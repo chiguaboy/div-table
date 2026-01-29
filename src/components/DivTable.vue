@@ -172,14 +172,26 @@ const getCellValue = (row: number, colIndex: number) => {
   return rowData[colIndex] ?? '';
 };
 
+const rafState = reactive({
+  scrollRaf: 0,
+});
+
+const scheduleScrollUpdate = () => {
+  if (rafState.scrollRaf) return;
+  rafState.scrollRaf = requestAnimationFrame(() => {
+    if (headerRef.value) {
+      headerRef.value.scrollLeft = state.scrollLeft;
+    }
+    updateRanges();
+    rafState.scrollRaf = 0;
+  });
+};
+
 const onScroll = (event: Event) => {
   const target = event.target as HTMLDivElement;
   state.scrollLeft = target.scrollLeft;
   state.scrollTop = target.scrollTop;
-  if (headerRef.value) {
-    headerRef.value.scrollLeft = state.scrollLeft;
-  }
-  updateRanges();
+  scheduleScrollUpdate();
 };
 
 const selection = reactive({
@@ -352,6 +364,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', stopResize);
   window.removeEventListener('pointerup', stopDrag);
   window.removeEventListener('pointerup', stopSelection);
+  if (rafState.scrollRaf) {
+    cancelAnimationFrame(rafState.scrollRaf);
+    rafState.scrollRaf = 0;
+  }
 });
 
 watch(
