@@ -14,6 +14,7 @@ export interface RenderResult {
 
 export interface RenderManagerConfig {
   rowCount: number;
+  colCount: number;
   rowHeight: number;
   colWidths: number[];
   bufferRows: number;
@@ -56,12 +57,10 @@ const findEndIndex = (offsets: number[], colWidths: number[], viewportEnd: numbe
 };
 
 export const createRenderManager = (config: RenderManagerConfig) => {
-  let cachedWidths = [...config.colWidths];
-  let cachedOffsets = buildColumnOffsets(cachedWidths);
+  let cachedOffsets = buildColumnOffsets(config.colWidths);
 
   const updateColumnWidths = (widths: number[]) => {
-    cachedWidths = [...widths];
-    cachedOffsets = buildColumnOffsets(cachedWidths);
+    cachedOffsets = buildColumnOffsets(widths);
   };
 
   const getRanges = (
@@ -78,30 +77,11 @@ export const createRenderManager = (config: RenderManagerConfig) => {
     const rawRowEnd = Math.floor((scrollTop + viewportHeight) / config.rowHeight);
     const rowEnd = clamp(rawRowEnd + config.bufferRows, 0, config.rowCount - 1);
 
-    if (cachedWidths.length === 0) {
-      return {
-        rowRange: {
-          start: rowStart,
-          end: rowEnd,
-          offset: rowStart * config.rowHeight,
-        },
-        colRange: {
-          start: 0,
-          end: -1,
-          offset: 0,
-        },
-        totalWidth: 0,
-        totalHeight,
-        colOffsets: [],
-      };
-    }
-
     const startIndex = findStartIndex(offsets, scrollLeft);
     const viewportEnd = scrollLeft + viewportWidth;
-    const endIndex = findEndIndex(offsets, cachedWidths, viewportEnd, startIndex);
-    const colLimit = cachedWidths.length - 1;
-    const colStart = clamp(startIndex - config.bufferCols, 0, colLimit);
-    const colEnd = clamp(endIndex + config.bufferCols, 0, colLimit);
+    const endIndex = findEndIndex(offsets, config.colWidths, viewportEnd, startIndex);
+    const colStart = clamp(startIndex - config.bufferCols, 0, config.colCount - 1);
+    const colEnd = clamp(endIndex + config.bufferCols, 0, config.colCount - 1);
 
     return {
       rowRange: {
