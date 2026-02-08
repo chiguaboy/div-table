@@ -1,0 +1,16 @@
+1. 表格左侧新增固定列，展示行号.固定列没有列头，不可调整列宽。
+2. 点击行号选中该行，shift操作支持选中多行
+3. 实现以下api,并通过defineExpose对外提供:
+   1. renameTable,重命名表名
+   2. refreshData，刷新数据
+   3. setColumnWidth，设置指定目标列的列宽
+   4. setRowHeight,设置所有行的行高
+   5. setFont，设置全表字体和字体大小
+   6. setAlign,设置全表文字align
+   7. setScrollOffset，设置表格滚动状态
+   8. renameColumn,重命名列
+   9. changeColumnVisible,设置列可见性
+   10. locateColumn,滚动定位到目标列
+   11. setColumnAlign,设置目标列的文字align
+   12. matchRow,选中并高亮目标行，支持多行
+   13. reserveMatchRow,选中并高亮目标行之外的行

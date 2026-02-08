@@ -70,4 +70,9 @@ export class DataManager {
     this.rowCache.set(row, data);
     this.touchRow(row);
   }
+
+  refresh() {
+    this.rowCache.clear();
+    this.order = [];
+  }
 }
