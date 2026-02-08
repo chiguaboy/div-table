@@ -504,7 +504,7 @@ const gridStyle = computed(() => ({
 }));
 
 const rowIndexGridStyle = computed(() => ({
-  transform: `translateY(${rowRange.value.offset}px)`,
+  transform: `translateY(${rowRange.value.offset - state.scrollTop}px)`,
 }));
 
 const headerCellClass = (colIndex: number) => {
