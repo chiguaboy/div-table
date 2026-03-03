@@ -131,6 +131,44 @@ export class DataManager {
         this.pendingBatches.delete(batchId);
       }
     }
+
+    const batchIds: number[] = [];
+    for (let row = prefetchStart; row <= prefetchEnd; row += this.config.batchSize) {
+      const batchStart = this.resolveBatchStart(row);
+      if (this.pendingBatches.has(batchStart)) continue;
+
+      const batchEnd = Math.min(batchStart + this.config.batchSize - 1, this.config.rowCount - 1);
+      let hasMissing = false;
+      for (let current = batchStart; current <= batchEnd; current += 1) {
+        if (!this.rowCache.has(current)) {
+          hasMissing = true;
+          break;
+        }
+      }
+      if (!hasMissing) continue;
+      this.pendingBatches.add(batchStart);
+      batchIds.push(batchStart);
+    }
+
+    if (batchIds.length === 0) return;
+
+    const rowsByBatch = await this.loadBatch(batchIds);
+    for (const batchStart of batchIds) {
+      const rows = rowsByBatch.get(batchStart);
+      if (!rows) {
+        this.pendingBatches.delete(batchStart);
+        continue;
+      }
+      for (let offset = 0; offset < rows.length; offset += 1) {
+        const rowIndex = batchStart + offset;
+        if (rowIndex >= this.config.rowCount) break;
+        this.rowCache.set(rowIndex, rows[offset]);
+        this.touchRow(rowIndex);
+      }
+      this.pendingBatches.delete(batchStart);
+    }
+
+    this.evictIfNeeded();
   }
 
   getRow(index: number): string[] {
