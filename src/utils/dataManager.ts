@@ -3,76 +3,170 @@ export interface DataManagerConfig {
   colCount: number;
   batchSize: number;
   maxCache: number;
+  buffer: number;
+  batchIds: number[];
+  loadBatchRows: (batchIds: number[]) => Promise<Map<number, string[][]>>;
 }
 
 export class DataManager {
-  private rowCache = new Map<number, string[]>();
+  private rowCache = new Map<number, Map<number, string[]>>();
   private order: number[] = [];
+  private pendingBatches = new Set<number>();
+  private rowPositionInBatch = new Array<number>();
+  private batchRowIndices = new Map<number, number[]>();
 
-  constructor(private config: DataManagerConfig) {}
+  constructor(private config: DataManagerConfig) {
+    this.initBatchMappings();
+  }
 
-  private touchRow(index: number) {
-    const existingIndex = this.order.indexOf(index);
+  private initBatchMappings() {
+    if (this.config.batchIds.length !== this.config.rowCount) {
+      throw new Error('batchIds length must equal rowCount');
+    }
+
+    for (let rowIndex = 0; rowIndex < this.config.rowCount; rowIndex += 1) {
+      const batchId = this.config.batchIds[rowIndex];
+      const rowIndices = this.batchRowIndices.get(batchId) ?? [];
+      this.rowPositionInBatch[rowIndex] = rowIndices.length;
+      rowIndices.push(rowIndex);
+      this.batchRowIndices.set(batchId, rowIndices);
+    }
+  }
+
+  private touchBatch(batchId: number) {
+    const existingIndex = this.order.indexOf(batchId);
     if (existingIndex !== -1) {
       this.order.splice(existingIndex, 1);
     }
-    this.order.push(index);
+    this.order.push(batchId);
   }
 
   private evictIfNeeded() {
     while (this.order.length > this.config.maxCache) {
-      const oldest = this.order.shift();
-      if (oldest !== undefined) {
-        this.rowCache.delete(oldest);
+      const oldestBatchId = this.order.shift();
+      if (oldestBatchId !== undefined) {
+        this.rowCache.delete(oldestBatchId);
       }
     }
   }
 
-  private generateRow(index: number): string[] {
-    const row: string[] = new Array(this.config.colCount);
-    for (let col = 0; col < this.config.colCount; col += 1) {
-      row[col] = `R${index + 1}-C${col + 1}`;
-    }
-    return row;
+  private createEmptyRow() {
+    return new Array(this.config.colCount).fill('');
   }
 
-  private loadBatch(start: number) {
-    const end = Math.min(start + this.config.batchSize, this.config.rowCount);
-    for (let i = start; i < end; i += 1) {
-      if (!this.rowCache.has(i)) {
-        this.rowCache.set(i, this.generateRow(i));
-        this.touchRow(i);
+  private hasRow(rowIndex: number) {
+    const batchId = this.config.batchIds[rowIndex];
+    const batchData = this.rowCache.get(batchId);
+    return Boolean(batchData?.has(rowIndex));
+  }
+
+  private shouldLoadBuffer(rangeStart: number, rangeEnd: number) {
+    for (let row = rangeStart; row <= rangeEnd; row += 1) {
+      if (!this.hasRow(row)) return true;
+    }
+    return this.rowCache.size <= this.config.buffer;
+  }
+
+  private collectBatchIds(startRow: number, endRow: number) {
+    const ids: number[] = [];
+    const unique = new Set<number>();
+
+    for (let row = startRow; row <= endRow; row += 1) {
+      const batchId = this.config.batchIds[row];
+      if (unique.has(batchId)) continue;
+      unique.add(batchId);
+
+      if (this.pendingBatches.has(batchId)) continue;
+
+      const hasBatch = this.rowCache.has(batchId);
+      if (hasBatch) {
+        const rowIndices = this.batchRowIndices.get(batchId) ?? [];
+        const batchData = this.rowCache.get(batchId);
+        const completed = rowIndices.length > 0 && rowIndices.every((rowIndex) => batchData?.has(rowIndex));
+        if (completed) continue;
       }
+
+      ids.push(batchId);
+      this.pendingBatches.add(batchId);
     }
-    this.evictIfNeeded();
+
+    return ids;
   }
 
-  ensureRange(start: number, end: number) {
+  async ensureRange(start: number, end: number) {
     const rangeStart = Math.max(0, start);
     const rangeEnd = Math.min(this.config.rowCount - 1, end);
-    for (let row = rangeStart; row <= rangeEnd; row += this.config.batchSize) {
-      this.loadBatch(row);
+    const prefetchStart = Math.max(0, rangeStart - this.config.buffer);
+    const prefetchEnd = Math.min(this.config.rowCount - 1, rangeEnd + this.config.buffer);
+
+    if (!this.shouldLoadBuffer(rangeStart, rangeEnd)) {
+      return;
+    }
+
+    const needBatchIds = this.collectBatchIds(prefetchStart, prefetchEnd);
+    if (needBatchIds.length === 0) return;
+
+    try {
+      const rowsByBatch = await this.config.loadBatchRows(needBatchIds);
+
+      for (const batchId of needBatchIds) {
+        const rows = rowsByBatch.get(batchId);
+        if (!rows) continue;
+
+        const rowIndices = this.batchRowIndices.get(batchId) ?? [];
+        const batchData = new Map<number, string[]>();
+        const limit = Math.min(rows.length, rowIndices.length);
+
+        for (let i = 0; i < limit; i += 1) {
+          batchData.set(rowIndices[i], rows[i]);
+        }
+
+        this.rowCache.set(batchId, batchData);
+        this.touchBatch(batchId);
+      }
+
+      this.evictIfNeeded();
+    } finally {
+      for (const batchId of needBatchIds) {
+        this.pendingBatches.delete(batchId);
+      }
     }
   }
 
   getRow(index: number): string[] {
-    if (!this.rowCache.has(index)) {
-      this.loadBatch(index);
+    if (index < 0 || index >= this.config.rowCount) {
+      return this.createEmptyRow();
     }
-    this.touchRow(index);
-    this.evictIfNeeded();
-    return this.rowCache.get(index) ?? this.generateRow(index);
+
+    const batchId = this.config.batchIds[index];
+    const batchData = this.rowCache.get(batchId);
+    const row = batchData?.get(index);
+
+    if (row) {
+      this.touchBatch(batchId);
+      this.evictIfNeeded();
+      return row;
+    }
+
+    void this.ensureRange(index, index);
+    return this.createEmptyRow();
   }
 
   updateCell(row: number, col: number, value: string) {
-    const data = this.getRow(row).slice();
+    const batchId = this.config.batchIds[row];
+    const batchData = this.rowCache.get(batchId) ?? new Map<number, string[]>();
+    const current = batchData.get(row) ?? this.createEmptyRow();
+    const data = current.slice();
     data[col] = value;
-    this.rowCache.set(row, data);
-    this.touchRow(row);
+    batchData.set(row, data);
+    this.rowCache.set(batchId, batchData);
+    this.touchBatch(batchId);
+    this.evictIfNeeded();
   }
 
   refresh() {
     this.rowCache.clear();
     this.order = [];
+    this.pendingBatches.clear();
   }
 }
