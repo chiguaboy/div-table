@@ -42,6 +42,7 @@ const dataManager = new DataManager({
   colCount,
   batchSize: 200,
   maxCache: 1200,
+  buffer: 400,
 });
 </script>
 
