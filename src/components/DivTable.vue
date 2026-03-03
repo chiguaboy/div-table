@@ -48,7 +48,12 @@
     </div>
 
     <div class="div-table__body">
-      <div class="div-table__row-index" ref="rowIndexRef" :style="{ width: `${rowIndexWidth}px` }">
+      <div
+        class="div-table__row-index"
+        ref="rowIndexRef"
+        :style="{ width: `${rowIndexWidth}px`, bottom: `${scrollbarState.horizontal}px` }"
+        @contextmenu="onRowIndexContextMenu"
+      >
         <div class="div-table__row-index-grid" :style="rowIndexGridStyle">
           <div
             v-for="row in visibleRows"
@@ -70,7 +75,7 @@
         @pointerdown="onBodyPointerDown"
         @pointermove="onBodyPointerMove"
       >
-        <div class="div-table__spacer" :style="{ width: `${totalWidth}px`, height: `${totalHeight}px` }"></div>
+        <div class="div-table__spacer" :style="{ width: `${contentWidth}px`, height: `${totalHeight}px` }"></div>
         <div class="div-table__grid" :style="gridStyle">
           <div v-for="row in visibleRows" :key="row" class="div-table__row" :style="{ height: `${rowHeightState}px` }">
             <div
@@ -137,6 +142,7 @@ const rowIndexWidth = computed(() => {
 });
 
 const state = reactive({ viewportWidth: 0, viewportHeight: 0, scrollLeft: 0, scrollTop: 0 });
+const scrollbarState = reactive({ horizontal: 0 });
 const columnManager = createColumnManager(props.columns);
 const allColumns = ref(columnManager.getColumns().slice());
 
@@ -163,6 +169,7 @@ const visibleCols = computed(() => {
 
 const totalWidth = computed(() => ranges.value.totalWidth);
 const totalHeight = computed(() => ranges.value.totalHeight);
+const contentWidth = computed(() => totalWidth.value + rowIndexWidth.value);
 const rowRange = computed(() => ranges.value.rowRange);
 const colRange = computed(() => ranges.value.colRange);
 
@@ -191,6 +198,19 @@ const syncColumns = () => {
 const updateRanges = () => {
   ranges.value = renderManager.getRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
   props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end);
+  syncScrollbarSize();
+};
+
+const syncScrollbarSize = () => {
+  const body = bodyRef.value;
+  if (!body) return;
+  const measured = Math.max(0, body.offsetHeight - body.clientHeight);
+  const hasHorizontalOverflow = body.scrollWidth > body.clientWidth + 1;
+  const overlayFallback = hasHorizontalOverflow ? 10 : 0;
+  const horizontal = Math.max(measured, overlayFallback);
+  if (scrollbarState.horizontal !== horizontal) {
+    scrollbarState.horizontal = horizontal;
+  }
 };
 
 const rafState = reactive({ scrollRaf: 0 });
@@ -427,6 +447,11 @@ const onRowIndexPointerDown = (row: number, event: PointerEvent) => {
   rowIndexDragState.lastRow = row;
 };
 
+const onRowIndexContextMenu = (event: MouseEvent) => {
+  if (!event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+};
+
 const stopSelection = () => {
   selection.selecting = false;
 };
@@ -587,7 +612,7 @@ const headerInnerStyle = computed(() => ({
 }));
 
 const gridStyle = computed(() => ({
-  transform: `translate(${colRange.value.offset}px, ${rowRange.value.offset}px)`,
+  transform: `translate(${colRange.value.offset + rowIndexWidth.value}px, ${rowRange.value.offset}px)`,
 }));
 
 const rowIndexGridStyle = computed(() => ({
@@ -804,11 +829,11 @@ watch(
 .div-table__resize-handle { cursor: col-resize; }
 .div-table__rename-input { width: 100%; height: 26px; border: 1px solid #60a5fa; border-radius: 4px; padding: 0 6px; }
 .div-table__drag-indicator { position: absolute; top: 0; height: 40px; width: 2px; background: #3b82f6; pointer-events: none; transition: transform 0.1s ease; }
-.div-table__body { flex: 1; display: flex; position: relative; font-size: 13px; }
-.div-table__scroll { flex: 1; overflow: auto; position: relative; min-width: 0; }
+.div-table__body { flex: 1; position: relative; font-size: 13px; overflow: hidden; }
+.div-table__scroll { width: 100%; height: 100%; overflow: auto; position: relative; min-width: 0; }
 .div-table__scroll.is-selecting { user-select: none; }
 .div-table__scroll.is-selecting .div-table__cell-input { user-select: text; }
-.div-table__row-index { position: relative; z-index: 1; height: 100%; background: #f8fafc; border-right: 1px solid #e2e8f0; overflow: hidden; flex: 0 0 auto; }
+.div-table__row-index { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1; background: #f8fafc; border-right: 1px solid #e2e8f0; overflow: hidden; }
 .div-table__row-index-grid { position: absolute; top: 0; left: 0; right: 0; }
 .div-table__row-index-cell { display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; color: #475569; border-bottom: 1px solid #e2e8f0; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; background: #f8fafc; }
 .div-table__row-index-cell.is-row-selected { background: #e0f2fe; color: #0f172a; }
