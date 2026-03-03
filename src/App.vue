@@ -37,12 +37,30 @@ const columns: ColumnDef[] = Array.from({ length: colCount }, (_, index) => ({
 
 columns[9].visible = false;
 
+const batchSize = 200;
+const batchIds = Array.from({ length: rowCount }, (_, rowIndex) => Math.floor(rowIndex / batchSize));
+
 const dataManager = new DataManager({
   rowCount,
   colCount,
-  batchSize: 200,
+  batchSize,
   maxCache: 1200,
   buffer: 400,
+  batchIds,
+  loadBatchRows: async (ids) => {
+    await Promise.resolve();
+    return new Map(
+      ids.map((batchId) => {
+        const start = batchId * batchSize;
+        const end = Math.min(start + batchSize, rowCount);
+        const rows = Array.from({ length: end - start }, (_, offset) => {
+          const rowIndex = start + offset;
+          return Array.from({ length: colCount }, (_, colIndex) => `R${rowIndex + 1}-C${colIndex + 1}`);
+        });
+        return [batchId, rows] as const;
+      }),
+    );
+  },
 });
 </script>
 
