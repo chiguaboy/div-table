@@ -4,22 +4,47 @@ export interface DataManagerConfig {
   batchSize: number;
   maxCache: number;
   buffer: number;
-  loadBatchRows?: (batchIds: number[]) => Promise<Map<number, string[][]>>;
+  batchIds?: number[];
+  loadBatchRows?: (batchIds: number[]) => Promise<Map<number, string[]>>;
 }
 
 export class DataManager {
   private rowCache = new Map<number, string[]>();
   private order: number[] = [];
   private pendingBatches = new Set<number>();
+  private readonly batchIds: number[];
+  private readonly rowIndexByBatchId = new Map<number, number>();
 
-  constructor(private config: DataManagerConfig) {}
+  constructor(private config: DataManagerConfig) {
+    this.batchIds = this.resolveBatchIds(config.batchIds);
+    this.buildBatchIndexMap();
+  }
 
-  private touchRow(index: number) {
-    const existingIndex = this.order.indexOf(index);
+  private resolveBatchIds(batchIds?: number[]) {
+    if (!batchIds) {
+      return Array.from({ length: this.config.rowCount }, (_, index) => index);
+    }
+    if (batchIds.length !== this.config.rowCount) {
+      throw new Error(`batchIds length(${batchIds.length}) must equal rowCount(${this.config.rowCount})`);
+    }
+    return batchIds.slice();
+  }
+
+  private buildBatchIndexMap() {
+    for (let rowIndex = 0; rowIndex < this.batchIds.length; rowIndex += 1) {
+      const batchId = this.batchIds[rowIndex];
+      if (!this.rowIndexByBatchId.has(batchId)) {
+        this.rowIndexByBatchId.set(batchId, rowIndex);
+      }
+    }
+  }
+
+  private touchBatch(batchId: number) {
+    const existingIndex = this.order.indexOf(batchId);
     if (existingIndex !== -1) {
       this.order.splice(existingIndex, 1);
     }
-    this.order.push(index);
+    this.order.push(batchId);
   }
 
   private evictIfNeeded() {
@@ -35,14 +60,29 @@ export class DataManager {
     return new Array(this.config.colCount).fill('');
   }
 
-  private resolveBatchStart(index: number) {
-    return Math.floor(index / this.config.batchSize) * this.config.batchSize;
+  private getBatchId(index: number) {
+    return this.batchIds[index];
+  }
+
+  private hasRowCached(index: number) {
+    const batchId = this.getBatchId(index);
+    if (batchId === undefined) return false;
+    return this.rowCache.has(batchId);
+  }
+
+  private collectBatchIds(start: number, end: number) {
+    const set = new Set<number>();
+    for (let row = start; row <= end; row += 1) {
+      const batchId = this.getBatchId(row);
+      if (batchId !== undefined) set.add(batchId);
+    }
+    return Array.from(set);
   }
 
   private shouldLoadBuffer(rangeStart: number, rangeEnd: number) {
     let cachedInRange = 0;
     for (let row = rangeStart; row <= rangeEnd; row += 1) {
-      if (this.rowCache.has(row)) cachedInRange += 1;
+      if (this.hasRowCached(row)) cachedInRange += 1;
     }
     const missingInRange = rangeEnd - rangeStart + 1 - cachedInRange;
     if (missingInRange > 0) return true;
@@ -53,13 +93,10 @@ export class DataManager {
     // 仅作为本地 demo 的 mock 接口，真实业务建议通过 config.loadBatchRows 注入实际请求。
     await Promise.resolve();
     return new Map(
-      batchIds.map((batchStart) => {
-        const end = Math.min(batchStart + this.config.batchSize, this.config.rowCount);
-        const rows = Array.from({ length: end - batchStart }, (_, offset) => {
-          const rowIndex = batchStart + offset;
-          return Array.from({ length: this.config.colCount }, (_, colIndex) => `R${rowIndex + 1}-C${colIndex + 1}`);
-        });
-        return [batchStart, rows] as const;
+      batchIds.map((batchId) => {
+        const rowIndex = this.rowIndexByBatchId.get(batchId) ?? 0;
+        const row = Array.from({ length: this.config.colCount }, (_, colIndex) => `R${rowIndex + 1}-C${colIndex + 1}`);
+        return [batchId, row] as const;
       }),
     );
   }
@@ -69,73 +106,87 @@ export class DataManager {
     return request(batchIds);
   }
 
-  async ensureRange(start: number, end: number) {
+  async ensureRange(start: number, end: number): Promise<boolean> {
+    if (this.config.rowCount <= 0) return false;
+
     const rangeStart = Math.max(0, start);
     const rangeEnd = Math.min(this.config.rowCount - 1, end);
+    if (rangeStart > rangeEnd) return false;
+
     const prefetchStart = Math.max(0, rangeStart - this.config.buffer);
     const prefetchEnd = Math.min(this.config.rowCount - 1, rangeEnd + this.config.buffer);
 
     if (!this.shouldLoadBuffer(rangeStart, rangeEnd)) {
-      return;
+      return false;
     }
 
-    const batchIds: number[] = [];
-    for (let row = prefetchStart; row <= prefetchEnd; row += this.config.batchSize) {
-      const batchStart = this.resolveBatchStart(row);
-      if (this.pendingBatches.has(batchStart)) continue;
+    const batchIds = this.collectBatchIds(prefetchStart, prefetchEnd).filter((batchId) => {
+      if (this.pendingBatches.has(batchId)) return false;
+      return !this.rowCache.has(batchId);
+    });
 
-      const batchEnd = Math.min(batchStart + this.config.batchSize - 1, this.config.rowCount - 1);
-      let hasMissing = false;
-      for (let current = batchStart; current <= batchEnd; current += 1) {
-        if (!this.rowCache.has(current)) {
-          hasMissing = true;
-          break;
-        }
-      }
-      if (!hasMissing) continue;
-      this.pendingBatches.add(batchStart);
-      batchIds.push(batchStart);
+    if (batchIds.length === 0) return false;
+
+    let hasUpdated = false;
+
+    for (const batchId of batchIds) {
+      this.pendingBatches.add(batchId);
     }
 
-    if (batchIds.length === 0) return;
-
-    const rowsByBatch = await this.loadBatch(batchIds);
-    for (const batchStart of batchIds) {
-      const rows = rowsByBatch.get(batchStart);
-      if (!rows) {
-        this.pendingBatches.delete(batchStart);
-        continue;
+    try {
+      const rowsByBatch = await this.loadBatch(batchIds);
+      console.log('batchIds', batchIds);
+      for (const batchId of batchIds) {
+        const row = rowsByBatch.get(batchId);
+        if (!row) continue;
+        this.rowCache.set(batchId, row);
+        this.touchBatch(batchId);
+        hasUpdated = true;
       }
-      for (let offset = 0; offset < rows.length; offset += 1) {
-        const rowIndex = batchStart + offset;
-        if (rowIndex >= this.config.rowCount) break;
-        this.rowCache.set(rowIndex, rows[offset]);
-        this.touchRow(rowIndex);
+      console.log('this.cache', this.rowCache);
+    } finally {
+      for (const batchId of batchIds) {
+        this.pendingBatches.delete(batchId);
       }
-      this.pendingBatches.delete(batchStart);
     }
 
     this.evictIfNeeded();
+    return hasUpdated;
   }
 
   getRow(index: number): string[] {
-    if (!this.rowCache.has(index)) {
+    if (index < 0 || index >= this.config.rowCount) {
+      return this.createEmptyRow();
+    }
+
+    const batchId = this.getBatchId(index);
+    if (batchId === undefined) {
+      return this.createEmptyRow();
+    }
+
+    const row = this.rowCache.get(batchId);
+    if (!row) {
       void this.ensureRange(index, index);
+      return this.createEmptyRow();
     }
-    const row = this.rowCache.get(index);
-    if (row) {
-      this.touchRow(index);
-      this.evictIfNeeded();
-      return row;
-    }
-    return this.createEmptyRow();
+
+    this.touchBatch(batchId);
+    this.evictIfNeeded();
+    return this.rowCache.get(batchId) ?? row;
   }
 
   updateCell(row: number, col: number, value: string) {
-    const data = this.getRow(row).slice();
+    if (row < 0 || row >= this.config.rowCount) return;
+    if (col < 0 || col >= this.config.colCount) return;
+
+    const batchId = this.getBatchId(row);
+    if (batchId === undefined) return;
+
+    const data = (this.rowCache.get(batchId) ?? this.createEmptyRow()).slice();
     data[col] = value;
-    this.rowCache.set(row, data);
-    this.touchRow(row);
+    this.rowCache.set(batchId, data);
+    this.touchBatch(batchId);
+    this.evictIfNeeded();
   }
 
   refresh() {

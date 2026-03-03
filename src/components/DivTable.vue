@@ -126,6 +126,7 @@ const wrapperRef = ref<HTMLDivElement | null>(null);
 const bodyRef = ref<HTMLDivElement | null>(null);
 const headerRef = ref<HTMLDivElement | null>(null);
 const rowIndexRef = ref<HTMLDivElement | null>(null);
+const dataVersion = ref(0);
 const headerHeight = 40;
 const tableName = ref('');
 const fontState = reactive({ family: '', size: 0 });
@@ -197,7 +198,9 @@ const syncColumns = () => {
 
 const updateRanges = () => {
   ranges.value = renderManager.getRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
-  props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end);
+  void props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end).then((updated) => {
+    if (updated) dataVersion.value += 1;
+  });
   syncScrollbarSize();
 };
 
@@ -477,7 +480,10 @@ const selectColumn = (columnIndex: number) => {
 };
 
 const editing = reactive({ row: -1, col: -1, value: '' });
-const getCellValue = (row: number, colIndex: number) => props.dataManager.getRow(row)[colIndex] ?? '';
+const getCellValue = (row: number, colIndex: number) => {
+  dataVersion.value;
+  return props.dataManager.getRow(row)[colIndex] ?? '';
+};
 const isEditing = (row: number, col: number) => editing.row === row && editing.col === col;
 
 const startEditing = (row: number, col: number) => {
