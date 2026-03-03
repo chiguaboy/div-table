@@ -48,7 +48,7 @@
     </div>
 
     <div class="div-table__body">
-      <div class="div-table__row-index" :style="{ width: `${rowIndexWidth}px` }">
+      <div class="div-table__row-index" ref="rowIndexRef" :style="{ width: `${rowIndexWidth}px` }">
         <div class="div-table__row-index-grid" :style="rowIndexGridStyle">
           <div
             v-for="row in visibleRows"
@@ -120,6 +120,7 @@ const props = defineProps<{
 const wrapperRef = ref<HTMLDivElement | null>(null);
 const bodyRef = ref<HTMLDivElement | null>(null);
 const headerRef = ref<HTMLDivElement | null>(null);
+const rowIndexRef = ref<HTMLDivElement | null>(null);
 const headerHeight = 40;
 const tableName = ref('');
 const fontState = reactive({ family: '', size: 0 });
@@ -239,6 +240,11 @@ const selection = reactive({
   hasSelection: false,
 });
 
+const clearCellSelection = () => {
+  selection.selecting = false;
+  selection.hasSelection = false;
+};
+
 type RowSelectionMode = 'none' | 'include-range' | 'include-set' | 'exclude-set';
 
 const rowSelection = reactive({
@@ -247,6 +253,12 @@ const rowSelection = reactive({
   rangeStart: -1,
   rangeEnd: -1,
   anchor: -1,
+});
+
+const rowIndexDragState = reactive({
+  active: false,
+  rangeStart: -1,
+  lastRow: -1,
 });
 
 const setSelection = (startRow: number, startCol: number, endRow: number, endCol: number) => {
@@ -287,6 +299,40 @@ const setRowSelectionSet = (rows: number[], mode: 'include-set' | 'exclude-set')
   rowSelection.rows = new Set(rows);
   rowSelection.rangeStart = -1;
   rowSelection.rangeEnd = -1;
+};
+
+const setIncludedRows = (rows: number[], anchor = -1) => {
+  if (rows.length === 0) {
+    clearRowSelection();
+    return;
+  }
+  const uniqueRows = Array.from(new Set(rows));
+  if (uniqueRows.length === 1) {
+    setRowSelectionRange(uniqueRows[0], uniqueRows[0]);
+    rowSelection.anchor = anchor >= 0 ? anchor : uniqueRows[0];
+    return;
+  }
+  setRowSelectionSet(uniqueRows, 'include-set');
+  rowSelection.anchor = anchor >= 0 ? anchor : uniqueRows[0];
+};
+
+const buildIncludedRowsSet = () => {
+  if (rowSelection.mode === 'include-set') {
+    return new Set(rowSelection.rows);
+  }
+  if (rowSelection.mode !== 'include-range') {
+    return new Set<number>();
+  }
+  if (rowSelection.rangeStart < 0 || rowSelection.rangeEnd < 0) {
+    return new Set<number>();
+  }
+  const min = Math.min(rowSelection.rangeStart, rowSelection.rangeEnd);
+  const max = Math.max(rowSelection.rangeStart, rowSelection.rangeEnd);
+  const rows = new Set<number>();
+  for (let row = min; row <= max; row += 1) {
+    rows.add(row);
+  }
+  return rows;
 };
 
 const isRowMatched = (row: number) => {
@@ -342,6 +388,7 @@ const onBodyPointerDown = (event: PointerEvent) => {
   const point = resolveCellTarget(event.target);
   if (!point) return;
   event.preventDefault();
+  clearRowSelection();
   selection.selecting = true;
   setSelection(point.row, point.col, point.row, point.col);
 };
@@ -355,20 +402,52 @@ const onBodyPointerMove = (event: PointerEvent) => {
 };
 
 const onRowIndexPointerDown = (row: number, event: PointerEvent) => {
+  if (event.button !== 0) return;
   event.preventDefault();
-  if (event.shiftKey && rowSelection.anchor >= 0) {
-    setRowSelectionRange(rowSelection.anchor, row);
+  clearCellSelection();
+  const appendMode = event.ctrlKey || event.metaKey;
+  if (appendMode && !event.shiftKey) {
+    const selectedRows = buildIncludedRowsSet();
+    if (selectedRows.has(row)) {
+      selectedRows.delete(row);
+    } else {
+      selectedRows.add(row);
+    }
+    setIncludedRows(Array.from(selectedRows), row);
+    stopRowIndexSelection();
     return;
   }
-  setRowSelectionRange(row, row);
-  rowSelection.anchor = row;
+  const rangeStart = event.shiftKey && rowSelection.anchor >= 0 ? rowSelection.anchor : row;
+  setRowSelectionRange(rangeStart, row);
+  if (!(event.shiftKey && rowSelection.anchor >= 0)) {
+    rowSelection.anchor = row;
+  }
+  rowIndexDragState.active = true;
+  rowIndexDragState.rangeStart = rangeStart;
+  rowIndexDragState.lastRow = row;
 };
 
 const stopSelection = () => {
   selection.selecting = false;
 };
 
+const stopRowIndexSelection = () => {
+  rowIndexDragState.active = false;
+  rowIndexDragState.rangeStart = -1;
+  rowIndexDragState.lastRow = -1;
+};
+
+const resolveRowByPointerY = (clientY: number) => {
+  const container = rowIndexRef.value;
+  if (!container) return -1;
+  const rect = container.getBoundingClientRect();
+  if (!Number.isFinite(rowHeightState.value) || rowHeightState.value <= 0 || rect.height <= 0) return -1;
+  const row = Math.floor((clientY - rect.top + state.scrollTop) / rowHeightState.value);
+  return Math.max(0, Math.min(props.rowCount - 1, row));
+};
+
 const selectColumn = (columnIndex: number) => {
+  clearRowSelection();
   setSelection(0, columnIndex, props.rowCount - 1, columnIndex);
 };
 
@@ -463,6 +542,14 @@ const onPointerMove = (event: PointerEvent) => {
     const nextWidth = resizeState.startWidth + (event.clientX - resizeState.startX);
     columnManager.resizeColumn(resizeState.colIndex, nextWidth);
     syncColumns();
+    return;
+  }
+  if (rowIndexDragState.active) {
+    const row = resolveRowByPointerY(event.clientY);
+    if (row >= 0 && row !== rowIndexDragState.lastRow) {
+      rowIndexDragState.lastRow = row;
+      setRowSelectionRange(rowIndexDragState.rangeStart, row);
+    }
     return;
   }
   if (!dragState.active) return;
@@ -616,22 +703,18 @@ const clearRowSelection = () => {
   rowSelection.anchor = -1;
 };
 
-const matchRow = (rows: number | number[]) => {
+const setSelectedRows = (rows: number | number[]) => {
+  clearCellSelection();
   const normalized = normalizeRowsInput(rows);
-  if (normalized.length === 0) {
-    clearRowSelection();
-    return;
-  }
-  if (normalized.length === 1) {
-    setRowSelectionRange(normalized[0], normalized[0]);
-    rowSelection.anchor = normalized[0];
-    return;
-  }
-  setRowSelectionSet(normalized, 'include-set');
-  rowSelection.anchor = normalized[0];
+  setIncludedRows(normalized, normalized[0] ?? -1);
+};
+
+const matchRow = (rows: number | number[]) => {
+  setSelectedRows(rows);
 };
 
 const reserveMatchRow = (rows: number | number[]) => {
+  clearCellSelection();
   const normalized = normalizeRowsInput(rows);
   setRowSelectionSet(normalized, 'exclude-set');
   rowSelection.anchor = normalized[0] ?? -1;
@@ -649,6 +732,7 @@ defineExpose({
   changeColumnVisible,
   locateColumn,
   setColumnAlign,
+  setSelectedRows,
   matchRow,
   reserveMatchRow,
 });
@@ -659,6 +743,7 @@ onMounted(() => {
   window.addEventListener('pointerup', stopResize);
   window.addEventListener('pointerup', stopDrag);
   window.addEventListener('pointerup', stopSelection);
+  window.addEventListener('pointerup', stopRowIndexSelection);
   updateRanges();
 });
 
@@ -668,6 +753,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', stopResize);
   window.removeEventListener('pointerup', stopDrag);
   window.removeEventListener('pointerup', stopSelection);
+  window.removeEventListener('pointerup', stopRowIndexSelection);
   if (rafState.scrollRaf) cancelAnimationFrame(rafState.scrollRaf);
 });
 
