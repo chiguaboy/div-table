@@ -12,6 +12,8 @@ export class DataManager {
   private rowCache = new Map<number, string[]>();
   private order: number[] = [];
   private pendingBatches = new Set<number>();
+  private queuedBatchIds = new Set<number>();
+  private flushPromise: Promise<boolean> | null = null;
   private readonly batchIds: number[];
   private readonly rowIndexByBatchId = new Map<number, number>();
 
@@ -106,6 +108,51 @@ export class DataManager {
     return request(batchIds);
   }
 
+  private scheduleFlush() {
+    if (!this.flushPromise) {
+      this.flushPromise = Promise.resolve().then(() => this.flushQueuedBatches());
+    }
+    return this.flushPromise;
+  }
+
+  private async flushQueuedBatches() {
+    let hasUpdated = false;
+    try {
+      while (this.queuedBatchIds.size > 0) {
+        const batchIds = Array.from(this.queuedBatchIds);
+        this.queuedBatchIds.clear();
+
+        for (const batchId of batchIds) {
+          this.pendingBatches.add(batchId);
+        }
+
+        try {
+          const rowsByBatch = await this.loadBatch(batchIds);
+          console.log('batchIds',batchIds)
+          for (const batchId of batchIds) {
+            const row = rowsByBatch.get(batchId);
+            if (!row) continue;
+            this.rowCache.set(batchId, row);
+            this.touchBatch(batchId);
+            hasUpdated = true;
+          }
+        } finally {
+          for (const batchId of batchIds) {
+            this.pendingBatches.delete(batchId);
+          }
+        }
+      }
+
+      this.evictIfNeeded();
+      return hasUpdated;
+    } finally {
+      this.flushPromise = null;
+      if (this.queuedBatchIds.size > 0) {
+        void this.scheduleFlush();
+      }
+    }
+  }
+
   async ensureRange(start: number, end: number): Promise<boolean> {
     if (this.config.rowCount <= 0) return false;
 
@@ -122,36 +169,21 @@ export class DataManager {
 
     const batchIds = this.collectBatchIds(prefetchStart, prefetchEnd).filter((batchId) => {
       if (this.pendingBatches.has(batchId)) return false;
+      if (this.queuedBatchIds.has(batchId)) return false;
       return !this.rowCache.has(batchId);
     });
 
-    if (batchIds.length === 0) return false;
-
-    let hasUpdated = false;
+    if (batchIds.length === 0) {
+      if (this.flushPromise) return this.flushPromise;
+      if (this.queuedBatchIds.size > 0) return this.scheduleFlush();
+      return false;
+    }
 
     for (const batchId of batchIds) {
-      this.pendingBatches.add(batchId);
+      this.queuedBatchIds.add(batchId);
     }
 
-    try {
-      const rowsByBatch = await this.loadBatch(batchIds);
-      console.log('batchIds', batchIds);
-      for (const batchId of batchIds) {
-        const row = rowsByBatch.get(batchId);
-        if (!row) continue;
-        this.rowCache.set(batchId, row);
-        this.touchBatch(batchId);
-        hasUpdated = true;
-      }
-      console.log('this.cache', this.rowCache);
-    } finally {
-      for (const batchId of batchIds) {
-        this.pendingBatches.delete(batchId);
-      }
-    }
-
-    this.evictIfNeeded();
-    return hasUpdated;
+    return this.scheduleFlush();
   }
 
   getRow(index: number): string[] {
@@ -193,5 +225,6 @@ export class DataManager {
     this.rowCache.clear();
     this.order = [];
     this.pendingBatches.clear();
+    this.queuedBatchIds.clear();
   }
 }
