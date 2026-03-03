@@ -8,6 +8,7 @@ export interface DataManagerConfig {
 export class DataManager {
   private rowCache = new Map<number, string[]>();
   private order: number[] = [];
+  private loadingBatches = new Map<number, Promise<void>>();
 
   constructor(private config: DataManagerConfig) {}
 
@@ -28,7 +29,7 @@ export class DataManager {
     }
   }
 
-  private generateRow(index: number): string[] {
+  private createRow(index: number): string[] {
     const row: string[] = new Array(this.config.colCount);
     for (let col = 0; col < this.config.colCount; col += 1) {
       row[col] = `R${index + 1}-C${col + 1}`;
@@ -36,32 +37,75 @@ export class DataManager {
     return row;
   }
 
-  private loadBatch(start: number) {
-    const end = Math.min(start + this.config.batchSize, this.config.rowCount);
-    for (let i = start; i < end; i += 1) {
-      if (!this.rowCache.has(i)) {
-        this.rowCache.set(i, this.generateRow(i));
-        this.touchRow(i);
-      }
+  private async generateRow(batchIds: number[]): Promise<Map<number, string[]>> {
+    const rows = new Map<number, string[]>();
+
+    await Promise.resolve();
+
+    for (const id of batchIds) {
+      rows.set(id, this.createRow(id));
     }
-    this.evictIfNeeded();
+
+    return rows;
   }
 
-  ensureRange(start: number, end: number) {
+  private async loadBatch(start: number) {
+    const batchStart = Math.max(0, start);
+    const loading = this.loadingBatches.get(batchStart);
+    if (loading) {
+      await loading;
+      return;
+    }
+
+    const task = (async () => {
+      const end = Math.min(batchStart + this.config.batchSize, this.config.rowCount);
+      const missingIds: number[] = [];
+      for (let i = batchStart; i < end; i += 1) {
+        if (!this.rowCache.has(i)) {
+          missingIds.push(i);
+        }
+      }
+
+      if (missingIds.length > 0) {
+        const rows = await this.generateRow(missingIds);
+        for (const id of missingIds) {
+          const row = rows.get(id);
+          if (row) {
+            this.rowCache.set(id, row);
+            this.touchRow(id);
+          }
+        }
+      }
+
+      this.evictIfNeeded();
+    })();
+
+    this.loadingBatches.set(batchStart, task);
+    try {
+      await task;
+    } finally {
+      this.loadingBatches.delete(batchStart);
+    }
+  }
+
+  async ensureRange(start: number, end: number) {
     const rangeStart = Math.max(0, start);
     const rangeEnd = Math.min(this.config.rowCount - 1, end);
     for (let row = rangeStart; row <= rangeEnd; row += this.config.batchSize) {
-      this.loadBatch(row);
+      await this.loadBatch(row);
     }
   }
 
   getRow(index: number): string[] {
     if (!this.rowCache.has(index)) {
-      this.loadBatch(index);
+      const batchStart = Math.floor(index / this.config.batchSize) * this.config.batchSize;
+      void this.loadBatch(batchStart);
+      return this.createRow(index);
     }
+
     this.touchRow(index);
     this.evictIfNeeded();
-    return this.rowCache.get(index) ?? this.generateRow(index);
+    return this.rowCache.get(index) ?? this.createRow(index);
   }
 
   updateCell(row: number, col: number, value: string) {
@@ -74,5 +118,6 @@ export class DataManager {
   refresh() {
     this.rowCache.clear();
     this.order = [];
+    this.loadingBatches.clear();
   }
 }

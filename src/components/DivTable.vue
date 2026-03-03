@@ -189,7 +189,7 @@ const syncColumns = () => {
 
 const updateRanges = () => {
   ranges.value = renderManager.getRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
-  props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end);
+  void props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end);
 };
 
 const rafState = reactive({ scrollRaf: 0 });
