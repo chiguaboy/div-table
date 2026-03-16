@@ -108,10 +108,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from 'vue';
+import { useColumnInteractions } from '../hooks/useColumnInteractions';
+import { useEditing } from '../hooks/useEditing';
+import { useSelect } from '../hooks/useSelect';
+import { useTableViewport } from '../hooks/useTableViewport';
 import type { DataManager } from '../utils/dataManager';
-import { createColumnManager, type ColumnAlign, type ColumnDef, type ManagedColumn } from '../utils/columnManager';
-import { buildColumnOffsets, createRenderManager } from '../utils/renderManager';
+import { createColumnManager, type ColumnAlign, type ColumnDef } from '../utils/columnManager';
+import { buildColumnOffsets } from '../utils/renderManager';
 
 const props = defineProps<{
   columns: ColumnDef[];
@@ -142,474 +146,132 @@ const rowIndexWidth = computed(() => {
   return Math.max(48, digits * 8 + 16);
 });
 
-const state = reactive({ viewportWidth: 0, viewportHeight: 0, scrollLeft: 0, scrollTop: 0 });
-const scrollbarState = reactive({ horizontal: 0 });
 const columnManager = createColumnManager(props.columns);
 const allColumns = ref(columnManager.getColumns().slice());
 
-let currentWidths = columnManager.getColumnWidths();
-let renderManager = createRenderManager({
-  rowCount: props.rowCount,
-  rowHeight: rowHeightState.value,
-  colWidths: currentWidths,
-  bufferRows: props.bufferRows,
-  bufferCols: props.bufferCols,
+const {
+  state,
+  scrollbarState,
+  ranges,
+  visibleColumnsAll,
+  visibleRows,
+  visibleCols,
+  totalWidth,
+  totalHeight,
+  contentWidth,
+  rowRange,
+  colRange,
+  onScroll,
+  applyScrollOffset,
+  rebuildRenderManager,
+  syncColumnWidths,
+  updateRanges,
+  mountViewport,
+  unmountViewport,
+  syncViewportFromWrapper,
+} = useTableViewport({
+  rowCount: toRef(props, 'rowCount'),
+  rowHeight: rowHeightState,
+  bufferRows: toRef(props, 'bufferRows'),
+  bufferCols: toRef(props, 'bufferCols'),
+  rowIndexWidth,
+  bodyRef,
+  headerRef,
+  wrapperRef,
+  allColumns,
+  dataManager: props.dataManager,
+  onDataUpdated: () => {
+    dataVersion.value += 1;
+  },
+  headerHeight,
 });
-
-const ranges = ref(renderManager.getRanges(0, 0, 0, 0));
-
-const visibleColumnsAll = computed(() => allColumns.value.filter((col) => col.visible));
-const visibleRows = computed(() => {
-  const { start, end } = ranges.value.rowRange;
-  return Array.from({ length: end - start + 1 }, (_, i) => start + i);
-});
-const visibleCols = computed(() => {
-  const { start, end } = ranges.value.colRange;
-  return visibleColumnsAll.value.slice(start, end + 1);
-});
-
-const totalWidth = computed(() => ranges.value.totalWidth);
-const totalHeight = computed(() => ranges.value.totalHeight);
-const contentWidth = computed(() => totalWidth.value + rowIndexWidth.value);
-const rowRange = computed(() => ranges.value.rowRange);
-const colRange = computed(() => ranges.value.colRange);
-
-const rebuildRenderManager = (widths = currentWidths) => {
-  renderManager = createRenderManager({
-    rowCount: props.rowCount,
-    rowHeight: rowHeightState.value,
-    colWidths: widths,
-    bufferRows: props.bufferRows,
-    bufferCols: props.bufferCols,
-  });
-};
 
 const syncColumns = () => {
   allColumns.value = columnManager.getColumns().slice();
-  const widths = columnManager.getColumnWidths();
-  if (widths.length !== currentWidths.length) {
-    rebuildRenderManager(widths);
-  } else {
-    renderManager.updateColumnWidths(widths);
-  }
-  currentWidths = widths;
-  updateRanges();
+  syncColumnWidths(columnManager.getColumnWidths());
 };
 
-const updateRanges = () => {
-  ranges.value = renderManager.getRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
-  void props.dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end).then((updated) => {
-    if (updated) dataVersion.value += 1;
-  });
-  syncScrollbarSize();
-};
-
-const syncScrollbarSize = () => {
-  const body = bodyRef.value;
-  if (!body) return;
-  const measured = Math.max(0, body.offsetHeight - body.clientHeight);
-  const hasHorizontalOverflow = body.scrollWidth > body.clientWidth + 1;
-  const overlayFallback = hasHorizontalOverflow ? 10 : 0;
-  const horizontal = Math.max(measured, overlayFallback);
-  if (scrollbarState.horizontal !== horizontal) {
-    scrollbarState.horizontal = horizontal;
-  }
-};
-
-const rafState = reactive({ scrollRaf: 0 });
-const scheduleScrollUpdate = () => {
-  if (rafState.scrollRaf) return;
-  rafState.scrollRaf = requestAnimationFrame(() => {
-    if (headerRef.value) headerRef.value.scrollLeft = state.scrollLeft;
-    updateRanges();
-    rafState.scrollRaf = 0;
-  });
-};
-
-const updateViewportSize = (width: number, height: number) => {
-  state.viewportWidth = Math.max(0, width - rowIndexWidth.value);
-  state.viewportHeight = height - headerHeight;
-};
-
-const resizeObserver = new ResizeObserver((entries) => {
-  const entry = entries[0];
-  if (!entry) return;
-  updateViewportSize(entry.contentRect.width, entry.contentRect.height);
-  updateRanges();
+const {
+  selection,
+  cellClass,
+  rowIndexClass,
+  headerCellClass,
+  onBodyPointerDown,
+  onBodyPointerMove,
+  onRowIndexPointerDown,
+  onRowIndexContextMenu,
+  onGlobalPointerMove: onSelectPointerMove,
+  stopSelection,
+  stopRowIndexSelection,
+  selectColumn,
+  setSelectedRows,
+  matchRow,
+  reserveMatchRow,
+} = useSelect({
+  rowCount: toRef(props, 'rowCount'),
+  rowHeight: rowHeightState,
+  rowIndexRef,
+  scrollTop: computed(() => state.scrollTop),
 });
 
-const onScroll = (event: Event) => {
-  const target = event.target as HTMLDivElement;
-  state.scrollLeft = target.scrollLeft;
-  state.scrollTop = target.scrollTop;
-  scheduleScrollUpdate();
-};
-
-const applyScrollOffset = (left?: number, top?: number) => {
-  if (!bodyRef.value) return;
-  if (typeof left === 'number') bodyRef.value.scrollLeft = left;
-  if (typeof top === 'number') bodyRef.value.scrollTop = top;
-  state.scrollLeft = bodyRef.value.scrollLeft;
-  state.scrollTop = bodyRef.value.scrollTop;
-  scheduleScrollUpdate();
-};
-
-const selection = reactive({
-  selecting: false,
-  startRow: 0,
-  startCol: 0,
-  endRow: 0,
-  endCol: 0,
-  hasSelection: false,
-});
-
-const clearCellSelection = () => {
-  selection.selecting = false;
-  selection.hasSelection = false;
-};
-
-type RowSelectionMode = 'none' | 'include-range' | 'include-set' | 'exclude-set';
-
-const rowSelection = reactive({
-  mode: 'none' as RowSelectionMode,
-  rows: new Set<number>(),
-  rangeStart: -1,
-  rangeEnd: -1,
-  anchor: -1,
-});
-
-const rowIndexDragState = reactive({
-  active: false,
-  rangeStart: -1,
-  lastRow: -1,
-});
-
-const setSelection = (startRow: number, startCol: number, endRow: number, endCol: number) => {
-  selection.startRow = startRow;
-  selection.startCol = startCol;
-  selection.endRow = endRow;
-  selection.endCol = endCol;
-  selection.hasSelection = true;
-};
-
-const selectionBounds = computed(() => ({
-  rowMin: Math.min(selection.startRow, selection.endRow),
-  rowMax: Math.max(selection.startRow, selection.endRow),
-  colMin: Math.min(selection.startCol, selection.endCol),
-  colMax: Math.max(selection.startCol, selection.endCol),
-}));
-
-const normalizeRowsInput = (input: number | number[]) => {
-  const list = Array.isArray(input) ? input : [input];
-  const maxRow = props.rowCount - 1;
-  const normalized: number[] = [];
-  for (const row of list) {
-    const value = Math.max(0, Math.min(maxRow, Math.floor(row)));
-    if (!Number.isNaN(value)) normalized.push(value);
-  }
-  return normalized;
-};
-
-const setRowSelectionRange = (start: number, end: number) => {
-  rowSelection.mode = 'include-range';
-  rowSelection.rangeStart = start;
-  rowSelection.rangeEnd = end;
-  rowSelection.rows = new Set();
-};
-
-const setRowSelectionSet = (rows: number[], mode: 'include-set' | 'exclude-set') => {
-  rowSelection.mode = mode;
-  rowSelection.rows = new Set(rows);
-  rowSelection.rangeStart = -1;
-  rowSelection.rangeEnd = -1;
-};
-
-const setIncludedRows = (rows: number[], anchor = -1) => {
-  if (rows.length === 0) {
-    clearRowSelection();
-    return;
-  }
-  const uniqueRows = Array.from(new Set(rows));
-  if (uniqueRows.length === 1) {
-    setRowSelectionRange(uniqueRows[0], uniqueRows[0]);
-    rowSelection.anchor = anchor >= 0 ? anchor : uniqueRows[0];
-    return;
-  }
-  setRowSelectionSet(uniqueRows, 'include-set');
-  rowSelection.anchor = anchor >= 0 ? anchor : uniqueRows[0];
-};
-
-const buildIncludedRowsSet = () => {
-  if (rowSelection.mode === 'include-set') {
-    return new Set(rowSelection.rows);
-  }
-  if (rowSelection.mode !== 'include-range') {
-    return new Set<number>();
-  }
-  if (rowSelection.rangeStart < 0 || rowSelection.rangeEnd < 0) {
-    return new Set<number>();
-  }
-  const min = Math.min(rowSelection.rangeStart, rowSelection.rangeEnd);
-  const max = Math.max(rowSelection.rangeStart, rowSelection.rangeEnd);
-  const rows = new Set<number>();
-  for (let row = min; row <= max; row += 1) {
-    rows.add(row);
-  }
-  return rows;
-};
-
-const isRowMatched = (row: number) => {
-  if (rowSelection.mode === 'include-range') {
-    if (rowSelection.rangeStart < 0 || rowSelection.rangeEnd < 0) return false;
-    const min = Math.min(rowSelection.rangeStart, rowSelection.rangeEnd);
-    const max = Math.max(rowSelection.rangeStart, rowSelection.rangeEnd);
-    return row >= min && row <= max;
-  }
-  if (rowSelection.mode === 'include-set') {
-    return rowSelection.rows.has(row);
-  }
-  if (rowSelection.mode === 'exclude-set') {
-    return !rowSelection.rows.has(row);
-  }
-  return false;
-};
-
-const cellClass = (row: number, col: number) => {
-  const classes: string[] = [];
-  if (selection.hasSelection) {
-    const { rowMin, rowMax, colMin, colMax } = selectionBounds.value;
-    if (row >= rowMin && row <= rowMax && col >= colMin && col <= colMax) {
-      classes.push('is-selected');
-    }
-  }
-  if (isRowMatched(row)) {
-    classes.push('is-row-selected');
-  }
-  return classes.join(' ');
-};
-
-const rowIndexClass = (row: number) => (isRowMatched(row) ? 'is-row-selected' : '');
-
-const resolveCellTarget = (target: EventTarget | null) => {
-  const element = target as HTMLElement | null;
-  const cell = element?.closest('.div-table__cell') as HTMLElement | null;
-  if (!cell) return null;
-  const row = Number(cell.dataset.row);
-  const col = Number(cell.dataset.col);
-  if (Number.isNaN(row) || Number.isNaN(col)) return null;
-  return { row, col };
-};
-
-const isInteractiveTarget = (target: EventTarget | null) => {
-  const element = target as HTMLElement | null;
-  if (!element) return false;
-  return Boolean(element.closest('input, textarea, select, button, [contenteditable="true"]'));
-};
-
-const onBodyPointerDown = (event: PointerEvent) => {
-  if (isInteractiveTarget(event.target)) return;
-  const point = resolveCellTarget(event.target);
-  if (!point) return;
-  event.preventDefault();
-  clearRowSelection();
-  selection.selecting = true;
-  setSelection(point.row, point.col, point.row, point.col);
-};
-
-const onBodyPointerMove = (event: PointerEvent) => {
-  if (!selection.selecting) return;
-  const point = resolveCellTarget(event.target);
-  if (!point) return;
-  selection.endRow = point.row;
-  selection.endCol = point.col;
-};
-
-const onRowIndexPointerDown = (row: number, event: PointerEvent) => {
-  if (event.button !== 0) return;
-  event.preventDefault();
-  clearCellSelection();
-  const appendMode = event.ctrlKey || event.metaKey;
-  if (appendMode && !event.shiftKey) {
-    const selectedRows = buildIncludedRowsSet();
-    if (selectedRows.has(row)) {
-      selectedRows.delete(row);
-    } else {
-      selectedRows.add(row);
-    }
-    setIncludedRows(Array.from(selectedRows), row);
-    stopRowIndexSelection();
-    return;
-  }
-  const rangeStart = event.shiftKey && rowSelection.anchor >= 0 ? rowSelection.anchor : row;
-  setRowSelectionRange(rangeStart, row);
-  if (!(event.shiftKey && rowSelection.anchor >= 0)) {
-    rowSelection.anchor = row;
-  }
-  rowIndexDragState.active = true;
-  rowIndexDragState.rangeStart = rangeStart;
-  rowIndexDragState.lastRow = row;
-};
-
-const onRowIndexContextMenu = (event: MouseEvent) => {
-  if (!event.ctrlKey && !event.metaKey) return;
-  event.preventDefault();
-};
-
-const stopSelection = () => {
-  selection.selecting = false;
-};
-
-const stopRowIndexSelection = () => {
-  rowIndexDragState.active = false;
-  rowIndexDragState.rangeStart = -1;
-  rowIndexDragState.lastRow = -1;
-};
-
-const resolveRowByPointerY = (clientY: number) => {
-  const container = rowIndexRef.value;
-  if (!container) return -1;
-  const rect = container.getBoundingClientRect();
-  if (!Number.isFinite(rowHeightState.value) || rowHeightState.value <= 0 || rect.height <= 0) return -1;
-  const row = Math.floor((clientY - rect.top + state.scrollTop) / rowHeightState.value);
-  return Math.max(0, Math.min(props.rowCount - 1, row));
-};
-
-const selectColumn = (columnIndex: number) => {
-  clearRowSelection();
-  setSelection(0, columnIndex, props.rowCount - 1, columnIndex);
-};
-
-const editing = reactive({ row: -1, col: -1, value: '' });
 const getCellValue = (row: number, colIndex: number) => {
   dataVersion.value;
   return props.dataManager.getRow(row)[colIndex] ?? '';
 };
-const isEditing = (row: number, col: number) => editing.row === row && editing.col === col;
 
-const startEditing = (row: number, col: number) => {
-  editing.row = row;
-  editing.col = col;
-  editing.value = getCellValue(row, col);
-  nextTick(() => {
-    const input = bodyRef.value?.querySelector<HTMLInputElement>('.div-table__cell-input');
-    input?.focus();
-    input?.select();
-  });
-};
-
-const onEditInput = (event: Event) => {
-  editing.value = (event.target as HTMLInputElement).value;
-};
-
-const commitEdit = () => {
-  if (editing.row < 0 || editing.col < 0) return;
-  props.dataManager.updateCell(editing.row, editing.col, editing.value);
-  editing.row = -1;
-  editing.col = -1;
-  editing.value = '';
-};
-
-const renameState = reactive({ index: -1, value: '' });
-const startRename = (col: ManagedColumn) => {
-  renameState.index = col.index;
-  renameState.value = col.label;
-  nextTick(() => {
-    const input = headerRef.value?.querySelector<HTMLInputElement>('.div-table__rename-input');
-    input?.focus();
-    input?.select();
-  });
-};
-const onRenameInput = (event: Event) => {
-  renameState.value = (event.target as HTMLInputElement).value;
-};
-const commitRename = () => {
-  if (renameState.index < 0) return;
-  columnManager.renameColumn(renameState.index, renameState.value);
-  renameState.index = -1;
-  renameState.value = '';
-  syncColumns();
-};
-const cancelRename = () => {
-  renameState.index = -1;
-  renameState.value = '';
-};
-
-const resizeState = reactive({ active: false, startX: 0, startWidth: 0, colIndex: -1 });
-const startResize = (event: PointerEvent, colIndex: number) => {
-  const col = allColumns.value.find((item) => item.index === colIndex);
-  if (!col) return;
-  resizeState.active = true;
-  resizeState.startX = event.clientX;
-  resizeState.startWidth = col.width;
-  resizeState.colIndex = colIndex;
-};
-
-const dragState = reactive({
-  active: false,
-  fromPosition: -1,
-  toPosition: -1,
+const {
+  editing,
+  renameState,
+  isEditing,
+  startEditing,
+  onEditInput,
+  commitEdit,
+  startRename,
+  onRenameInput,
+  commitRename,
+  cancelRename,
+} = useEditing({
+  bodyRef,
+  headerRef,
+  getCellValue,
+  updateCell: (row, col, value) => {
+    props.dataManager.updateCell(row, col, value);
+  },
+  renameColumn: (columnIndex, label) => {
+    columnManager.renameColumn(columnIndex, label);
+  },
+  onRenamed: syncColumns,
 });
 
-const startDrag = (event: PointerEvent, position: number) => {
-  event.preventDefault();
-  dragState.active = true;
-  dragState.fromPosition = position;
-  dragState.toPosition = position;
-};
-
-const dragIndicatorStyle = computed(() => {
-  if (!dragState.active || dragState.toPosition < 0) return { opacity: '0' };
-  const offsets = ranges.value.colOffsets;
-  const base = offsets[colRange.value.start] ?? 0;
-  const visibleOffset = offsets[dragState.toPosition] ?? 0;
-  return {
-    opacity: '1',
-    transform: `translateX(${visibleOffset - base + rowIndexWidth.value}px)`,
-  };
+const {
+  startResize,
+  startDrag,
+  onGlobalPointerMove: onColumnPointerMove,
+  stopResize,
+  stopDrag,
+  dragIndicatorStyle,
+  headerCellStyle,
+  cellStyle,
+} = useColumnInteractions({
+  allColumns,
+  visibleColumns: visibleColumnsAll,
+  ranges,
+  colRangeStart: computed(() => colRange.value.start),
+  rowIndexWidth,
+  headerRef,
+  scrollLeft: computed(() => state.scrollLeft),
+  resizeColumn: (columnIndex, width) => {
+    columnManager.resizeColumn(columnIndex, width);
+  },
+  reorderColumns: (fromPosition, toPosition) => {
+    columnManager.reorderColumnByPosition(fromPosition, toPosition);
+  },
+  syncColumns,
 });
 
 const onPointerMove = (event: PointerEvent) => {
-  if (resizeState.active) {
-    const nextWidth = resizeState.startWidth + (event.clientX - resizeState.startX);
-    columnManager.resizeColumn(resizeState.colIndex, nextWidth);
-    syncColumns();
-    return;
-  }
-  if (rowIndexDragState.active) {
-    const row = resolveRowByPointerY(event.clientY);
-    if (row >= 0 && row !== rowIndexDragState.lastRow) {
-      rowIndexDragState.lastRow = row;
-      setRowSelectionRange(rowIndexDragState.rangeStart, row);
-    }
-    return;
-  }
-  if (!dragState.active) return;
-  const headerBounds = headerRef.value?.getBoundingClientRect();
-  if (!headerBounds) return;
-  const relativeX = event.clientX - headerBounds.left + state.scrollLeft;
-  const offsets = ranges.value.colOffsets;
-  const cols = visibleColumnsAll.value;
-  let target = Math.max(cols.length - 1, 0);
-  for (let i = 0; i < cols.length; i += 1) {
-    if (relativeX < offsets[i] + cols[i].width / 2) {
-      target = i;
-      break;
-    }
-  }
-  dragState.toPosition = target;
-};
-
-const stopResize = () => {
-  resizeState.active = false;
-};
-
-const stopDrag = () => {
-  if (!dragState.active) return;
-  columnManager.reorderColumnByPosition(dragState.fromPosition, dragState.toPosition);
-  dragState.active = false;
-  dragState.fromPosition = -1;
-  dragState.toPosition = -1;
-  syncColumns();
+  if (onColumnPointerMove(event)) return;
+  onSelectPointerMove(event);
 };
 
 const headerInnerStyle = computed(() => ({
@@ -624,37 +286,6 @@ const gridStyle = computed(() => ({
 const rowIndexGridStyle = computed(() => ({
   transform: `translateY(${rowRange.value.offset - state.scrollTop}px)`,
 }));
-
-const headerCellClass = (colIndex: number) => {
-  if (!selection.hasSelection) return '';
-  return selectionBounds.value.colMin === colIndex && selectionBounds.value.colMax === colIndex ? 'is-column-selected' : '';
-};
-
-const toFlexAlign = (align: ManagedColumn['align']) => {
-  if (align === 'center') return 'center';
-  if (align === 'right') return 'flex-end';
-  return 'flex-start';
-};
-
-const headerCellStyle = (col: ManagedColumn, position: number) => {
-  const dragging = dragState.active && dragState.fromPosition === position;
-  return {
-    width: `${col.width}px`,
-    justifyContent: toFlexAlign(col.align),
-    transform: dragging ? 'scale(0.98)' : undefined,
-    opacity: dragging ? '0.6' : '1',
-    ...col.style,
-  };
-};
-
-const cellStyle = (col: ManagedColumn, position: number) => {
-  const dragTarget = dragState.active && dragState.toPosition === position;
-  return {
-    width: `${col.width}px`,
-    justifyContent: toFlexAlign(col.align),
-    boxShadow: dragTarget ? 'inset 2px 0 0 #3b82f6' : undefined,
-  };
-};
 
 const renameTable = (name: string) => {
   tableName.value = name?.toString().trim() ?? '';
@@ -726,31 +357,6 @@ const setColumnAlign = (columnIndex: number, align: ColumnAlign) => {
   syncColumns();
 };
 
-const clearRowSelection = () => {
-  rowSelection.mode = 'none';
-  rowSelection.rows = new Set();
-  rowSelection.rangeStart = -1;
-  rowSelection.rangeEnd = -1;
-  rowSelection.anchor = -1;
-};
-
-const setSelectedRows = (rows: number | number[]) => {
-  clearCellSelection();
-  const normalized = normalizeRowsInput(rows);
-  setIncludedRows(normalized, normalized[0] ?? -1);
-};
-
-const matchRow = (rows: number | number[]) => {
-  setSelectedRows(rows);
-};
-
-const reserveMatchRow = (rows: number | number[]) => {
-  clearCellSelection();
-  const normalized = normalizeRowsInput(rows);
-  setRowSelectionSet(normalized, 'exclude-set');
-  rowSelection.anchor = normalized[0] ?? -1;
-};
-
 defineExpose({
   renameTable,
   refreshData,
@@ -769,23 +375,21 @@ defineExpose({
 });
 
 onMounted(() => {
-  if (wrapperRef.value) resizeObserver.observe(wrapperRef.value);
+  mountViewport();
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', stopResize);
   window.addEventListener('pointerup', stopDrag);
   window.addEventListener('pointerup', stopSelection);
   window.addEventListener('pointerup', stopRowIndexSelection);
-  updateRanges();
 });
 
 onBeforeUnmount(() => {
-  resizeObserver.disconnect();
+  unmountViewport();
   window.removeEventListener('pointermove', onPointerMove);
   window.removeEventListener('pointerup', stopResize);
   window.removeEventListener('pointerup', stopDrag);
   window.removeEventListener('pointerup', stopSelection);
   window.removeEventListener('pointerup', stopRowIndexSelection);
-  if (rafState.scrollRaf) cancelAnimationFrame(rafState.scrollRaf);
 });
 
 watch(
@@ -810,10 +414,7 @@ watch(
   () => props.rowCount,
   () => {
     rebuildRenderManager();
-    if (wrapperRef.value) {
-      const rect = wrapperRef.value.getBoundingClientRect();
-      updateViewportSize(rect.width, rect.height);
-    }
+    syncViewportFromWrapper();
     updateRanges();
   },
 );
