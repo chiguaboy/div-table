@@ -1,7 +1,8 @@
-import { computed, reactive, ref, type Ref } from 'vue';
+import { computed, reactive, watch, type Ref } from 'vue';
 import type { ManagedColumn } from '../utils/columnManager';
 import type { DataManager } from '../utils/dataManager';
-import { createRenderManager, type RenderResult } from '../utils/renderManager';
+import { useDataManager } from './useDataManager';
+import { useRenderManager } from './useRenderManager';
 
 interface UseTableViewportOptions {
   rowCount: Readonly<Ref<number>>;
@@ -12,9 +13,8 @@ interface UseTableViewportOptions {
   bodyRef: Ref<HTMLDivElement | null>;
   headerRef: Ref<HTMLDivElement | null>;
   wrapperRef: Ref<HTMLDivElement | null>;
-  allColumns: Ref<ManagedColumn[]>;
+  visibleColumns: Readonly<Ref<ManagedColumn[]>>;
   dataManager: DataManager;
-  onDataUpdated: () => void;
   headerHeight?: number;
 }
 
@@ -27,27 +27,26 @@ export const useTableViewport = ({
   bodyRef,
   headerRef,
   wrapperRef,
-  allColumns,
+  visibleColumns,
   dataManager,
-  onDataUpdated,
   headerHeight = 40,
 }: UseTableViewportOptions) => {
   const state = reactive({ viewportWidth: 0, viewportHeight: 0, scrollLeft: 0, scrollTop: 0 });
   const scrollbarState = reactive({ horizontal: 0 });
-  const visibleColumnsAll = computed(() => allColumns.value.filter((col) => col.visible));
+  const visibleColumnWidths = computed(() => visibleColumns.value.map((col) => col.width));
 
-  const createManager = (widths: number[]) =>
-    createRenderManager({
-      rowCount: rowCount.value,
-      rowHeight: rowHeight.value,
-      colWidths: widths,
-      bufferRows: bufferRows.value,
-      bufferCols: bufferCols.value,
-    });
+  const { ranges, calculateRanges, syncColumnWidths, rebuildRenderManager } = useRenderManager({
+    rowCount,
+    rowHeight,
+    bufferRows,
+    bufferCols,
+    colWidths: visibleColumnWidths,
+  });
 
-  let currentWidths = visibleColumnsAll.value.map((col) => col.width);
-  let renderManager = createManager(currentWidths);
-  const ranges = ref<RenderResult>(renderManager.getRanges(0, 0, 0, 0));
+  const { ensureRange, getCellValue, updateCell, refreshData } = useDataManager({
+    dataManager,
+  });
+
   let scrollRaf = 0;
 
   const visibleRows = computed(() => {
@@ -59,7 +58,7 @@ export const useTableViewport = ({
   const visibleCols = computed(() => {
     const { start, end } = ranges.value.colRange;
     if (end < start) return [];
-    return visibleColumnsAll.value.slice(start, end + 1);
+    return visibleColumns.value.slice(start, end + 1);
   });
 
   const totalWidth = computed(() => ranges.value.totalWidth);
@@ -81,10 +80,8 @@ export const useTableViewport = ({
   };
 
   const updateRanges = () => {
-    ranges.value = renderManager.getRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
-    void dataManager.ensureRange(ranges.value.rowRange.start, ranges.value.rowRange.end).then((updated) => {
-      if (updated) onDataUpdated();
-    });
+    const nextRanges = calculateRanges(state.viewportWidth, state.viewportHeight, state.scrollLeft, state.scrollTop);
+    void ensureRange(nextRanges.rowRange.start, nextRanges.rowRange.end);
     syncScrollbarSize();
   };
 
@@ -133,20 +130,10 @@ export const useTableViewport = ({
     scheduleScrollUpdate();
   };
 
-  const rebuildRenderManager = (widths = currentWidths) => {
-    currentWidths = widths.slice();
-    renderManager = createManager(currentWidths);
-  };
-
-  const syncColumnWidths = (widths: number[]) => {
-    if (widths.length !== currentWidths.length) {
-      rebuildRenderManager(widths);
-    } else {
-      currentWidths = widths.slice();
-      renderManager.updateColumnWidths(currentWidths);
-    }
+  watch(visibleColumnWidths, (widths) => {
+    syncColumnWidths(widths);
     updateRanges();
-  };
+  });
 
   const mountViewport = () => {
     if (wrapperRef.value) resizeObserver.observe(wrapperRef.value);
@@ -163,7 +150,6 @@ export const useTableViewport = ({
     state,
     scrollbarState,
     ranges,
-    visibleColumnsAll,
     visibleRows,
     visibleCols,
     totalWidth,
@@ -179,5 +165,8 @@ export const useTableViewport = ({
     mountViewport,
     unmountViewport,
     syncViewportFromWrapper,
+    getCellValue,
+    updateCell,
+    refreshData,
   };
 };

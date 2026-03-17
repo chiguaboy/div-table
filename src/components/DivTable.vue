@@ -1,15 +1,14 @@
 <template>
-  <div class="div-table" ref="wrapperRef" :style="tableStyle" :data-table-name="tableName">
+  <div class="div-table" ref="wrapperRef" :data-table-name="tableName" :data-style-scope="styleScopeId">
     <div class="div-table__header">
-      <div class="div-table__row-index-header" :style="{ width: `${rowIndexWidth}px` }"></div>
+      <div class="div-table__row-index-header"></div>
       <div class="div-table__header-scroll" ref="headerRef">
-        <div class="div-table__header-inner" :style="headerInnerStyle">
+        <div class="div-table__header-inner">
         <div
           v-for="(col, position) in visibleCols"
           :key="col.key"
           class="div-table__header-cell"
-          :style="headerCellStyle(col, position)"
-          :class="headerCellClass(col.index)"
+          :class="[headerCellClass(col.index), getHeaderCellClasses(col, position)]"
         >
           <button
             class="div-table__drag-handle"
@@ -44,23 +43,21 @@
         </div>
         </div>
       </div>
-      <div class="div-table__drag-indicator" :style="dragIndicatorStyle"></div>
+      <div class="div-table__drag-indicator"></div>
     </div>
 
     <div class="div-table__body">
       <div
         class="div-table__row-index"
         ref="rowIndexRef"
-        :style="{ width: `${rowIndexWidth}px`, bottom: `${scrollbarState.horizontal}px` }"
         @contextmenu="onRowIndexContextMenu"
       >
-        <div class="div-table__row-index-grid" :style="rowIndexGridStyle">
+        <div class="div-table__row-index-grid">
           <div
             v-for="row in visibleRows"
             :key="row"
             class="div-table__row-index-cell"
             :class="rowIndexClass(row)"
-            :style="{ height: `${rowHeightState}px` }"
             @pointerdown.stop="onRowIndexPointerDown(row, $event)"
           >
             {{ row + 1 }}
@@ -75,17 +72,16 @@
         @pointerdown="onBodyPointerDown"
         @pointermove="onBodyPointerMove"
       >
-        <div class="div-table__spacer" :style="{ width: `${contentWidth}px`, height: `${totalHeight}px` }"></div>
-        <div class="div-table__grid" :style="gridStyle">
-          <div v-for="row in visibleRows" :key="row" class="div-table__row" :style="{ height: `${rowHeightState}px` }">
+        <div class="div-table__spacer"></div>
+        <div class="div-table__grid">
+          <div v-for="row in visibleRows" :key="row" class="div-table__row">
             <div
               v-for="(col, position) in visibleCols"
               :key="col.key"
               class="div-table__cell"
               :data-row="row"
               :data-col="col.index"
-              :style="cellStyle(col, position)"
-              :class="cellClass(row, col.index)"
+              :class="[cellClass(row, col.index), getBodyCellClasses(col, position)]"
               @dblclick="startEditing(row, col.index)"
             >
               <input
@@ -110,11 +106,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from 'vue';
 import { useColumnInteractions } from '../hooks/useColumnInteractions';
+import { useColumnManager } from '../hooks/useColumnManager';
 import { useEditing } from '../hooks/useEditing';
 import { useSelect } from '../hooks/useSelect';
 import { useTableViewport } from '../hooks/useTableViewport';
 import type { DataManager } from '../utils/dataManager';
-import { createColumnManager, type ColumnAlign, type ColumnDef } from '../utils/columnManager';
+import { type ColumnAlign, type ColumnDef, type ManagedColumn } from '../utils/columnManager';
 import { buildColumnOffsets } from '../utils/renderManager';
 
 const props = defineProps<{
@@ -130,30 +127,77 @@ const wrapperRef = ref<HTMLDivElement | null>(null);
 const bodyRef = ref<HTMLDivElement | null>(null);
 const headerRef = ref<HTMLDivElement | null>(null);
 const rowIndexRef = ref<HTMLDivElement | null>(null);
-const dataVersion = ref(0);
 const headerHeight = 40;
+const styleScopeId = `div-table-${Math.random().toString(36).slice(2, 10)}`;
 const tableName = ref('');
 const fontState = reactive({ family: '', size: 0 });
-const tableStyle = computed(() => {
-  const style: Record<string, string> = {};
-  if (fontState.family) style.fontFamily = fontState.family;
-  if (fontState.size > 0) style.fontSize = `${fontState.size}px`;
-  return style;
-});
 const rowHeightState = ref(props.rowHeight);
 const rowIndexWidth = computed(() => {
   const digits = String(props.rowCount).length;
   return Math.max(48, digits * 8 + 16);
 });
 
-const columnManager = createColumnManager(props.columns);
-const allColumns = ref(columnManager.getColumns().slice());
+const {
+  allColumns,
+  visibleColumns,
+  renameColumn: renameColumnByIndex,
+  resizeColumn: resizeColumnByIndex,
+  reorderColumnByPosition,
+  setColumnVisible,
+  setColumnAlign: setColumnAlignByIndex,
+  setAllColumnsAlign,
+} = useColumnManager({
+  columns: toRef(props, 'columns'),
+});
+
+const getAlignClass = (align: ManagedColumn['align']) => `is-align-${align}`;
+const getColumnWidthClass = (columnIndex: number) => `div-table__col-${columnIndex}`;
+const getHeaderStyleClass = (columnIndex: number) => `div-table__header-col-${columnIndex}`;
+
+const kebabCase = (input: string) => input.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
+
+const serializeHeaderStyle = (style?: Record<string, string>) => {
+  if (!style) return '';
+  return Object.entries(style)
+    .map(([key, value]) => `${kebabCase(key)}: ${value};`)
+    .join(' ');
+};
+
+const columnDynamicStyleText = computed(() => {
+  const rootSelector = `.div-table[data-style-scope="${styleScopeId}"]`;
+  return allColumns.value
+    .map((col) => {
+      const widthRule = `${rootSelector} .${getColumnWidthClass(col.index)} { width: ${col.width}px; }`;
+      const headerStyleText = serializeHeaderStyle(col.style);
+      const headerRule = headerStyleText
+        ? `${rootSelector} .${getHeaderStyleClass(col.index)} { ${headerStyleText} }`
+        : '';
+      return [widthRule, headerRule].filter(Boolean).join('\n');
+    })
+    .join('\n');
+});
+
+let dynamicColumnStyleEl: HTMLStyleElement | null = null;
+const ensureDynamicColumnStyleEl = () => {
+  if (typeof document === 'undefined') return null;
+  if (dynamicColumnStyleEl) return dynamicColumnStyleEl;
+  const styleEl = document.createElement('style');
+  styleEl.setAttribute('data-div-table-style-scope', styleScopeId);
+  document.head.appendChild(styleEl);
+  dynamicColumnStyleEl = styleEl;
+  return dynamicColumnStyleEl;
+};
+
+const syncDynamicColumnStyles = () => {
+  const styleEl = ensureDynamicColumnStyleEl();
+  if (!styleEl) return;
+  styleEl.textContent = columnDynamicStyleText.value;
+};
 
 const {
   state,
   scrollbarState,
   ranges,
-  visibleColumnsAll,
   visibleRows,
   visibleCols,
   totalWidth,
@@ -164,11 +208,13 @@ const {
   onScroll,
   applyScrollOffset,
   rebuildRenderManager,
-  syncColumnWidths,
   updateRanges,
   mountViewport,
   unmountViewport,
   syncViewportFromWrapper,
+  getCellValue,
+  updateCell,
+  refreshData: refreshTableData,
 } = useTableViewport({
   rowCount: toRef(props, 'rowCount'),
   rowHeight: rowHeightState,
@@ -178,18 +224,10 @@ const {
   bodyRef,
   headerRef,
   wrapperRef,
-  allColumns,
+  visibleColumns,
   dataManager: props.dataManager,
-  onDataUpdated: () => {
-    dataVersion.value += 1;
-  },
   headerHeight,
 });
-
-const syncColumns = () => {
-  allColumns.value = columnManager.getColumns().slice();
-  syncColumnWidths(columnManager.getColumnWidths());
-};
 
 const {
   selection,
@@ -214,11 +252,6 @@ const {
   scrollTop: computed(() => state.scrollTop),
 });
 
-const getCellValue = (row: number, colIndex: number) => {
-  dataVersion.value;
-  return props.dataManager.getRow(row)[colIndex] ?? '';
-};
-
 const {
   editing,
   renameState,
@@ -234,39 +267,26 @@ const {
   bodyRef,
   headerRef,
   getCellValue,
-  updateCell: (row, col, value) => {
-    props.dataManager.updateCell(row, col, value);
-  },
-  renameColumn: (columnIndex, label) => {
-    columnManager.renameColumn(columnIndex, label);
-  },
-  onRenamed: syncColumns,
+  updateCell,
+  renameColumn: renameColumnByIndex,
 });
 
 const {
+  dragState,
   startResize,
   startDrag,
   onGlobalPointerMove: onColumnPointerMove,
   stopResize,
   stopDrag,
-  dragIndicatorStyle,
-  headerCellStyle,
-  cellStyle,
+  headerCellDragClass,
+  cellDragClass,
 } = useColumnInteractions({
   allColumns,
-  visibleColumns: visibleColumnsAll,
-  ranges,
-  colRangeStart: computed(() => colRange.value.start),
-  rowIndexWidth,
+  visibleColumns,
   headerRef,
   scrollLeft: computed(() => state.scrollLeft),
-  resizeColumn: (columnIndex, width) => {
-    columnManager.resizeColumn(columnIndex, width);
-  },
-  reorderColumns: (fromPosition, toPosition) => {
-    columnManager.reorderColumnByPosition(fromPosition, toPosition);
-  },
-  syncColumns,
+  resizeColumn: resizeColumnByIndex,
+  reorderColumns: reorderColumnByPosition,
 });
 
 const onPointerMove = (event: PointerEvent) => {
@@ -274,31 +294,46 @@ const onPointerMove = (event: PointerEvent) => {
   onSelectPointerMove(event);
 };
 
-const headerInnerStyle = computed(() => ({
-  width: `${totalWidth.value}px`,
-  transform: `translateX(${colRange.value.offset}px)`,
-}));
+const getHeaderCellClasses = (col: ManagedColumn, position: number) =>
+  [getColumnWidthClass(col.index), getHeaderStyleClass(col.index), getAlignClass(col.align), headerCellDragClass(position)]
+    .filter(Boolean)
+    .join(' ');
 
-const gridStyle = computed(() => ({
-  transform: `translate(${colRange.value.offset + rowIndexWidth.value}px, ${rowRange.value.offset}px)`,
-}));
+const getBodyCellClasses = (col: ManagedColumn, position: number) =>
+  [getColumnWidthClass(col.index), getAlignClass(col.align), cellDragClass(position)].filter(Boolean).join(' ');
 
-const rowIndexGridStyle = computed(() => ({
-  transform: `translateY(${rowRange.value.offset - state.scrollTop}px)`,
-}));
+const tableFontFamily = computed(() => fontState.family || 'inherit');
+const tableFontSize = computed(() => (fontState.size > 0 ? `${fontState.size}px` : 'inherit'));
+const rowIndexWidthPx = computed(() => `${rowIndexWidth.value}px`);
+const headerInnerWidthPx = computed(() => `${totalWidth.value}px`);
+const headerInnerOffsetPx = computed(() => `${colRange.value.offset}px`);
+const dragIndicatorOpacity = computed(() => (dragState.active && dragState.toPosition >= 0 ? '1' : '0'));
+const dragIndicatorOffsetPx = computed(() => {
+  if (!dragState.active || dragState.toPosition < 0) return '0px';
+  const offsets = ranges.value.colOffsets;
+  const base = offsets[colRange.value.start] ?? 0;
+  const visibleOffset = offsets[dragState.toPosition] ?? 0;
+  return `${visibleOffset - base + rowIndexWidth.value}px`;
+});
+const rowIndexBottomPx = computed(() => `${scrollbarState.horizontal}px`);
+const rowIndexGridOffsetPx = computed(() => `${rowRange.value.offset - state.scrollTop}px`);
+const spacerWidthPx = computed(() => `${contentWidth.value}px`);
+const spacerHeightPx = computed(() => `${totalHeight.value}px`);
+const gridOffsetXPx = computed(() => `${colRange.value.offset + rowIndexWidth.value}px`);
+const gridOffsetYPx = computed(() => `${rowRange.value.offset}px`);
+const rowHeightPx = computed(() => `${rowHeightState.value}px`);
 
 const renameTable = (name: string) => {
   tableName.value = name?.toString().trim() ?? '';
 };
 
 const refreshData = () => {
-  props.dataManager.refresh();
+  refreshTableData();
   updateRanges();
 };
 
 const setColumnWidth = (columnIndex: number, width: number) => {
-  columnManager.resizeColumn(columnIndex, width);
-  syncColumns();
+  resizeColumnByIndex(columnIndex, width);
 };
 
 const setRowHeight = (height: number) => {
@@ -314,8 +349,7 @@ const setFont = (family: string, size?: number) => {
 };
 
 const setAlign = (align: ColumnAlign) => {
-  allColumns.value.forEach((col) => columnManager.setColumnAlign(col.index, align));
-  syncColumns();
+  setAllColumnsAlign(align);
 };
 
 const setScrollOffset = (
@@ -334,17 +368,15 @@ const setScrollOffset = (
 };
 
 const renameColumn = (columnIndex: number, label: string) => {
-  columnManager.renameColumn(columnIndex, label);
-  syncColumns();
+  renameColumnByIndex(columnIndex, label);
 };
 
 const changeColumnVisible = (columnIndex: number, visible: boolean) => {
-  columnManager.setColumnVisible(columnIndex, visible);
-  syncColumns();
+  setColumnVisible(columnIndex, visible);
 };
 
 const locateColumn = (columnIndex: number) => {
-  const visible = visibleColumnsAll.value;
+  const visible = visibleColumns.value;
   const position = visible.findIndex((col) => col.index === columnIndex);
   if (position < 0) return;
   const { offsets } = buildColumnOffsets(visible.map((col) => col.width));
@@ -353,8 +385,7 @@ const locateColumn = (columnIndex: number) => {
 };
 
 const setColumnAlign = (columnIndex: number, align: ColumnAlign) => {
-  columnManager.setColumnAlign(columnIndex, align);
-  syncColumns();
+  setColumnAlignByIndex(columnIndex, align);
 };
 
 defineExpose({
@@ -374,6 +405,14 @@ defineExpose({
   reserveMatchRow,
 });
 
+watch(
+  columnDynamicStyleText,
+  () => {
+    syncDynamicColumnStyles();
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   mountViewport();
   window.addEventListener('pointermove', onPointerMove);
@@ -390,15 +429,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', stopDrag);
   window.removeEventListener('pointerup', stopSelection);
   window.removeEventListener('pointerup', stopRowIndexSelection);
+  dynamicColumnStyleEl?.remove();
+  dynamicColumnStyleEl = null;
 });
-
-watch(
-  () => props.columns,
-  (next) => {
-    columnManager.setColumns(next);
-    syncColumns();
-  },
-);
 
 watch(
   () => props.rowHeight,
@@ -418,15 +451,24 @@ watch(
     updateRanges();
   },
 );
+
+watch(
+  () => [props.bufferRows, props.bufferCols],
+  () => {
+    rebuildRenderManager();
+    updateRanges();
+  },
+);
 </script>
 
 <style scoped>
-.div-table { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #fff; display: flex; flex-direction: column; height: 600px; }
+.div-table { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #fff; display: flex; flex-direction: column; height: 600px; font-family: v-bind(tableFontFamily); font-size: v-bind(tableFontSize); }
 .div-table__header { overflow: hidden; border-bottom: 1px solid #e2e8f0; background: #f1f5f9; position: relative; display: flex; height: 40px; }
-.div-table__row-index-header { flex: 0 0 auto; height: 100%; border-right: 1px solid #e2e8f0; background: #f8fafc; }
+.div-table__row-index-header { flex: 0 0 auto; height: 100%; border-right: 1px solid #e2e8f0; background: #f8fafc; width: v-bind(rowIndexWidthPx); }
 .div-table__header-scroll { flex: 1; overflow: hidden; height: 100%; position: relative; }
-.div-table__header-inner { display: flex; height: 40px; position: relative; }
+.div-table__header-inner { display: flex; height: 40px; position: relative; width: v-bind(headerInnerWidthPx); transform: translateX(v-bind(headerInnerOffsetPx)); }
 .div-table__header-cell { position: relative; display: flex; align-items: center; border-right: 1px solid #e2e8f0; user-select: none; transition: transform 0.16s ease, opacity 0.16s ease, box-shadow 0.16s ease; }
+.div-table__header-cell.is-dragging { transform: scale(0.98); opacity: 0.6; }
 .div-table__header-cell:hover .div-table__drag-handle,
 .div-table__header-cell:hover .div-table__resize-handle { opacity: 1; }
 .div-table__header-center { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: inherit; padding: 0 4px; cursor: pointer; }
@@ -435,20 +477,26 @@ watch(
 .div-table__resize-handle { width: 18px; height: 100%; border: 0; background: transparent; color: #64748b; opacity: 0; cursor: grab; transition: opacity 0.15s ease; }
 .div-table__resize-handle { cursor: col-resize; }
 .div-table__rename-input { width: 100%; height: 26px; border: 1px solid #60a5fa; border-radius: 4px; padding: 0 6px; }
-.div-table__drag-indicator { position: absolute; top: 0; height: 40px; width: 2px; background: #3b82f6; pointer-events: none; transition: transform 0.1s ease; }
+.div-table__drag-indicator { position: absolute; top: 0; height: 40px; width: 2px; background: #3b82f6; pointer-events: none; transition: transform 0.1s ease; opacity: v-bind(dragIndicatorOpacity); transform: translateX(v-bind(dragIndicatorOffsetPx)); }
 .div-table__body { flex: 1; position: relative; font-size: 13px; overflow: hidden; }
 .div-table__scroll { width: 100%; height: 100%; overflow: auto; position: relative; min-width: 0; }
 .div-table__scroll.is-selecting { user-select: none; }
 .div-table__scroll.is-selecting .div-table__cell-input { user-select: text; }
-.div-table__row-index { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1; background: #f8fafc; border-right: 1px solid #e2e8f0; overflow: hidden; }
-.div-table__row-index-grid { position: absolute; top: 0; left: 0; right: 0; }
-.div-table__row-index-cell { display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; color: #475569; border-bottom: 1px solid #e2e8f0; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; background: #f8fafc; }
+.div-table__row-index { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1; background: #f8fafc; border-right: 1px solid #e2e8f0; overflow: hidden; width: v-bind(rowIndexWidthPx); bottom: v-bind(rowIndexBottomPx); }
+.div-table__row-index-grid { position: absolute; top: 0; left: 0; right: 0; transform: translateY(v-bind(rowIndexGridOffsetPx)); }
+.div-table__row-index-cell { display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; color: #475569; border-bottom: 1px solid #e2e8f0; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; background: #f8fafc; height: v-bind(rowHeightPx); }
 .div-table__row-index-cell.is-row-selected { background: #e0f2fe; color: #0f172a; }
 .div-table__spacer, .div-table__grid { position: absolute; top: 0; left: 0; }
-.div-table__row { display: flex; }
+.div-table__spacer { width: v-bind(spacerWidthPx); height: v-bind(spacerHeightPx); }
+.div-table__grid { transform: translate(v-bind(gridOffsetXPx), v-bind(gridOffsetYPx)); }
+.div-table__row { display: flex; height: v-bind(rowHeightPx); }
 .div-table__cell { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 0 8px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fff; }
+.div-table__cell.is-drag-target { box-shadow: inset 2px 0 0 #3b82f6; }
 .div-table__cell.is-row-selected { background: #e0f2fe; }
 .div-table__cell.is-selected { background: #dbeafe; }
 .div-table__header-cell.is-column-selected { background: #dbeafe; }
+.div-table__header-cell.is-align-left, .div-table__cell.is-align-left { justify-content: flex-start; }
+.div-table__header-cell.is-align-center, .div-table__cell.is-align-center { justify-content: center; }
+.div-table__header-cell.is-align-right, .div-table__cell.is-align-right { justify-content: flex-end; }
 .div-table__cell-input { width: 100%; height: 28px; border: 1px solid #60a5fa; border-radius: 6px; padding: 0 6px; outline: none; }
 </style>
