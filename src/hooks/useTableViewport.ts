@@ -14,7 +14,7 @@ interface UseTableViewportOptions {
   headerRef: Ref<HTMLDivElement | null>;
   wrapperRef: Ref<HTMLDivElement | null>;
   visibleColumns: Readonly<Ref<ManagedColumn[]>>;
-  dataManager: DataManager;
+  dataManager: Readonly<Ref<DataManager>>;
   headerHeight?: number;
 }
 

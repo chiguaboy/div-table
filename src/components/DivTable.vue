@@ -104,13 +104,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, toRef, watch } from 'vue';
 import { useColumnInteractions } from '../hooks/useColumnInteractions';
 import { useColumnManager } from '../hooks/useColumnManager';
 import { useEditing } from '../hooks/useEditing';
 import { useSelect } from '../hooks/useSelect';
 import { useTableViewport } from '../hooks/useTableViewport';
-import type { DataManager } from '../utils/dataManager';
+import { DataManager } from '../utils/dataManager';
 import { type ColumnAlign, type ColumnDef, type ManagedColumn } from '../utils/columnManager';
 import { buildColumnOffsets } from '../utils/renderManager';
 
@@ -120,7 +120,11 @@ const props = defineProps<{
   rowHeight: number;
   bufferRows: number;
   bufferCols: number;
-  dataManager: DataManager;
+  batchIds?: number[];
+  loadBatchRows?: (batchIds: number[]) => Promise<Map<number, string[]>>;
+  batchSize?: number;
+  maxCache?: number;
+  dataBuffer?: number;
 }>();
 
 const wrapperRef = ref<HTMLDivElement | null>(null);
@@ -136,6 +140,27 @@ const rowIndexWidth = computed(() => {
   const digits = String(props.rowCount).length;
   return Math.max(48, digits * 8 + 16);
 });
+
+const DEFAULT_BATCH_SIZE = 200;
+const DEFAULT_MAX_CACHE = 1200;
+const DEFAULT_DATA_BUFFER = 400;
+
+const createDataManager = () =>
+  new DataManager({
+    rowCount: props.rowCount,
+    colCount: props.columns.length,
+    batchSize: props.batchSize ?? DEFAULT_BATCH_SIZE,
+    maxCache: props.maxCache ?? DEFAULT_MAX_CACHE,
+    buffer: props.dataBuffer ?? DEFAULT_DATA_BUFFER,
+    batchIds: props.batchIds,
+    loadBatchRows: props.loadBatchRows,
+  });
+
+const dataManagerRef = shallowRef<DataManager>(createDataManager());
+
+const recreateDataManager = () => {
+  dataManagerRef.value = createDataManager();
+};
 
 const {
   allColumns,
@@ -225,7 +250,7 @@ const {
   headerRef,
   wrapperRef,
   visibleColumns,
-  dataManager: props.dataManager,
+  dataManager: dataManagerRef,
   headerHeight,
 });
 
@@ -446,8 +471,17 @@ watch(
 watch(
   () => props.rowCount,
   () => {
+    recreateDataManager();
     rebuildRenderManager();
     syncViewportFromWrapper();
+    updateRanges();
+  },
+);
+
+watch(
+  () => props.columns.length,
+  () => {
+    recreateDataManager();
     updateRanges();
   },
 );
@@ -458,6 +492,23 @@ watch(
     rebuildRenderManager();
     updateRanges();
   },
+);
+
+watch(
+  () => [props.batchSize, props.maxCache, props.dataBuffer, props.loadBatchRows],
+  () => {
+    recreateDataManager();
+    updateRanges();
+  },
+);
+
+watch(
+  () => props.batchIds,
+  () => {
+    recreateDataManager();
+    updateRanges();
+  },
+  { deep: true },
 );
 </script>
 

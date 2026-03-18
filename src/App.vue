@@ -10,14 +10,13 @@
       :row-height="rowHeight"
       :buffer-rows="bufferRows"
       :buffer-cols="bufferCols"
-      :data-manager="dataManager"
+      :load-batch-rows="loadBatchRows"
     />
   </div>
 </template>
 
 <script setup lang="ts">
 import DivTable from './components/DivTable.vue';
-import { DataManager } from './utils/dataManager';
 import type { ColumnDef } from './utils/columnManager';
 
 const rowCount = 1_000_000;
@@ -37,13 +36,15 @@ const columns: ColumnDef[] = Array.from({ length: colCount }, (_, index) => ({
 
 columns[9].visible = false;
 
-const dataManager = new DataManager({
-  rowCount,
-  colCount,
-  batchSize: 200,
-  maxCache: 1200,
-  buffer: 400,
-});
+const loadBatchRows = async (batchIds: number[]) => {
+  await Promise.resolve();
+  return new Map(
+    batchIds.map((batchId) => {
+      const row = Array.from({ length: colCount }, (_, colIndex) => `R${batchId + 1}-C${colIndex + 1}`);
+      return [batchId, row] as const;
+    }),
+  );
+};
 </script>
 
 <style scoped>

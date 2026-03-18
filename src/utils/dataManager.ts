@@ -128,7 +128,6 @@ export class DataManager {
 
         try {
           const rowsByBatch = await this.loadBatch(batchIds);
-          console.log('batchIds',batchIds)
           for (const batchId of batchIds) {
             const row = rowsByBatch.get(batchId);
             if (!row) continue;
