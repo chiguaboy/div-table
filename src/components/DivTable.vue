@@ -35,8 +35,9 @@
 
           <button
             class="div-table__resize-handle"
-            title="拖拽调整列宽"
-            @pointerdown.stop="startResize($event, col.index)"
+            :class="{ 'is-disabled': !isColumnResizeEnabled }"
+            :title="isColumnResizeEnabled ? '拖拽调整列宽' : '当前为列名自适应宽度模式'"
+            @pointerdown.stop="onResizeHandlePointerDown($event, col.index)"
           >
             ⋮
           </button>
@@ -57,8 +58,10 @@
             v-for="row in visibleRows"
             :key="row"
             class="div-table__row-index-cell"
+            :data-row="row"
+            data-col="-1"
             :class="rowIndexClass(row)"
-            @pointerdown.stop="onRowIndexPointerDown(row, $event)"
+            @pointerdown.stop="onRowIndexPointerDown($event)"
           >
             {{ row + 1 }}
           </div>
@@ -69,6 +72,7 @@
         ref="bodyRef"
         :class="{ 'is-selecting': selection.selecting }"
         @scroll="onScroll"
+        @contextmenu="onBodyContextMenu"
         @pointerdown="onBodyPointerDown"
         @pointermove="onBodyPointerMove"
       >
@@ -82,6 +86,7 @@
               :data-row="row"
               :data-col="col.index"
               :class="[cellClass(row, col.index), getBodyCellClasses(col, position)]"
+              :title="isEditing(row, col.index) ? '' : getCellValue(row, col.index)"
               @dblclick="startEditing(row, col.index)"
             >
               <input
@@ -93,7 +98,7 @@
                 @keydown.enter.prevent="commitEdit"
               />
               <template v-else>
-                {{ getCellValue(row, col.index) }}
+                <span class="div-table__cell-text">{{ getCellValue(row, col.index) }}</span>
               </template>
             </div>
           </div>
@@ -135,7 +140,12 @@ const headerHeight = 40;
 const styleScopeId = `div-table-${Math.random().toString(36).slice(2, 10)}`;
 const tableName = ref('');
 const fontState = reactive({ family: '', size: 0 });
+const measuredFontSize = ref(13);
 const rowHeightState = ref(props.rowHeight);
+const rowHeightAuto = ref(true);
+type ColumnWidthMode = 'fixed' | 'label' | 'auto';
+const columnWidthMode = ref<'fixed' | 'label'>('fixed');
+const fixedWidthCache = new Map<number, number>();
 const rowIndexWidth = computed(() => {
   const digits = String(props.rowCount).length;
   return Math.max(48, digits * 8 + 16);
@@ -186,6 +196,68 @@ const serializeHeaderStyle = (style?: Record<string, string>) => {
   return Object.entries(style)
     .map(([key, value]) => `${kebabCase(key)}: ${value};`)
     .join(' ');
+};
+
+const effectiveFontSize = computed(() => (fontState.size > 0 ? fontState.size : measuredFontSize.value));
+
+const calcAdaptiveRowHeight = (fontSize: number) => {
+  const safeSize = Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 13;
+  return Math.max(32, Math.round(safeSize * 2.3 + 6));
+};
+
+const updateRowHeightState = (height: number) => {
+  if (!Number.isFinite(height) || height <= 0) return;
+  const next = Math.round(height);
+  if (next === rowHeightState.value) return;
+  rowHeightState.value = next;
+  rebuildRenderManager();
+  updateRanges();
+};
+
+const applyAdaptiveRowHeight = () => {
+  if (!rowHeightAuto.value) return;
+  updateRowHeightState(calcAdaptiveRowHeight(effectiveFontSize.value));
+};
+
+const syncMeasuredFontSize = () => {
+  const target = bodyRef.value ?? wrapperRef.value;
+  if (!target) return;
+  const parsed = Number.parseFloat(window.getComputedStyle(target).fontSize);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    measuredFontSize.value = parsed;
+  }
+};
+
+const calcLabelUnits = (label: string) =>
+  Array.from(label).reduce((total, char) => total + (/[\u0000-\u00ff]/.test(char) ? 1 : 2), 0);
+
+const calcLabelAutoWidth = (label: string) => {
+  const units = calcLabelUnits(label.trim() || ' ');
+  const base = Math.ceil(units * effectiveFontSize.value * 0.62 + 46);
+  return Math.max(80, base);
+};
+
+const snapshotFixedColumnWidths = () => {
+  allColumns.value.forEach((col) => {
+    fixedWidthCache.set(col.index, Math.max(60, col.width));
+  });
+};
+
+const applyFixedColumnWidths = () => {
+  allColumns.value.forEach((col) => {
+    const cached = fixedWidthCache.get(col.index);
+    if (typeof cached !== 'number') return;
+    if (cached === col.width) return;
+    resizeColumnByIndex(col.index, cached);
+  });
+};
+
+const applyLabelAutoWidths = () => {
+  allColumns.value.forEach((col) => {
+    const nextWidth = calcLabelAutoWidth(col.label);
+    if (nextWidth === col.width) return;
+    resizeColumnByIndex(col.index, nextWidth);
+  });
 };
 
 const columnDynamicStyleText = computed(() => {
@@ -314,6 +386,18 @@ const {
   reorderColumns: reorderColumnByPosition,
 });
 
+const isColumnResizeEnabled = computed(() => columnWidthMode.value === 'fixed');
+
+const onResizeHandlePointerDown = (event: PointerEvent, colIndex: number) => {
+  if (!isColumnResizeEnabled.value) return;
+  startResize(event, colIndex);
+};
+
+const onBodyContextMenu = (event: MouseEvent) => {
+  if (!event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+};
+
 const onPointerMove = (event: PointerEvent) => {
   if (onColumnPointerMove(event)) return;
   onSelectPointerMove(event);
@@ -357,20 +441,48 @@ const refreshData = () => {
   updateRanges();
 };
 
+const normalizeColumnWidthMode = (mode: ColumnWidthMode) => {
+  if (mode === 'fixed') return 'fixed' as const;
+  if (mode === 'label' || mode === 'auto') return 'label' as const;
+  return null;
+};
+
+const setColumnWidthMode = (mode: ColumnWidthMode) => {
+  const normalizedMode = normalizeColumnWidthMode(mode);
+  if (!normalizedMode) return;
+  if (normalizedMode === columnWidthMode.value) return;
+  if (normalizedMode === 'label') {
+    snapshotFixedColumnWidths();
+  }
+  columnWidthMode.value = normalizedMode;
+  if (normalizedMode === 'label') {
+    applyLabelAutoWidths();
+    return;
+  }
+  applyFixedColumnWidths();
+};
+
 const setColumnWidth = (columnIndex: number, width: number) => {
-  resizeColumnByIndex(columnIndex, width);
+  if (!Number.isFinite(width) || width <= 0) return;
+  const normalized = Math.max(60, Math.round(width));
+  fixedWidthCache.set(columnIndex, normalized);
+  if (columnWidthMode.value === 'label') return;
+  resizeColumnByIndex(columnIndex, normalized);
 };
 
 const setRowHeight = (height: number) => {
   if (!Number.isFinite(height) || height <= 0) return;
-  rowHeightState.value = height;
-  rebuildRenderManager();
-  updateRanges();
+  rowHeightAuto.value = false;
+  updateRowHeightState(height);
 };
 
 const setFont = (family: string, size?: number) => {
   if (typeof family === 'string') fontState.family = family;
-  if (typeof size === 'number') fontState.size = size;
+  if (typeof size === 'number' && size > 0) {
+    fontState.size = size;
+    rowHeightAuto.value = true;
+    applyAdaptiveRowHeight();
+  }
 };
 
 const setAlign = (align: ColumnAlign) => {
@@ -416,6 +528,7 @@ const setColumnAlign = (columnIndex: number, align: ColumnAlign) => {
 defineExpose({
   renameTable,
   refreshData,
+  setColumnWidthMode,
   setColumnWidth,
   setRowHeight,
   setFont,
@@ -438,8 +551,28 @@ watch(
   { immediate: true },
 );
 
+watch(effectiveFontSize, () => {
+  applyAdaptiveRowHeight();
+  if (columnWidthMode.value === 'label') {
+    applyLabelAutoWidths();
+  }
+});
+
+watch(
+  () => allColumns.value.map((col) => `${col.index}:${col.label}`).join('|'),
+  () => {
+    if (columnWidthMode.value !== 'label') return;
+    applyLabelAutoWidths();
+  },
+);
+
 onMounted(() => {
   mountViewport();
+  syncMeasuredFontSize();
+  applyAdaptiveRowHeight();
+  if (columnWidthMode.value === 'label') {
+    applyLabelAutoWidths();
+  }
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', stopResize);
   window.addEventListener('pointerup', stopDrag);
@@ -461,10 +594,8 @@ onBeforeUnmount(() => {
 watch(
   () => props.rowHeight,
   (next) => {
-    if (next === rowHeightState.value) return;
-    rowHeightState.value = next;
-    rebuildRenderManager();
-    updateRanges();
+    if (rowHeightAuto.value) return;
+    updateRowHeightState(next);
   },
 );
 
@@ -527,6 +658,7 @@ watch(
 .div-table__drag-handle,
 .div-table__resize-handle { width: 18px; height: 100%; border: 0; background: transparent; color: #64748b; opacity: 0; cursor: grab; transition: opacity 0.15s ease; }
 .div-table__resize-handle { cursor: col-resize; }
+.div-table__resize-handle.is-disabled { opacity: 0.35 !important; cursor: not-allowed; }
 .div-table__rename-input { width: 100%; height: 26px; border: 1px solid #60a5fa; border-radius: 4px; padding: 0 6px; }
 .div-table__drag-indicator { position: absolute; top: 0; height: 40px; width: 2px; background: #3b82f6; pointer-events: none; transition: transform 0.1s ease; opacity: v-bind(dragIndicatorOpacity); transform: translateX(v-bind(dragIndicatorOffsetPx)); }
 .div-table__body { flex: 1; position: relative; font-size: 13px; overflow: hidden; }
@@ -536,12 +668,14 @@ watch(
 .div-table__row-index { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1; background: #f8fafc; border-right: 1px solid #e2e8f0; overflow: hidden; width: v-bind(rowIndexWidthPx); bottom: v-bind(rowIndexBottomPx); }
 .div-table__row-index-grid { position: absolute; top: 0; left: 0; right: 0; transform: translateY(v-bind(rowIndexGridOffsetPx)); }
 .div-table__row-index-cell { display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; color: #475569; border-bottom: 1px solid #e2e8f0; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; background: #f8fafc; height: v-bind(rowHeightPx); }
+.div-table__row-index-cell.is-selected { background: #dbeafe; color: #0f172a; }
 .div-table__row-index-cell.is-row-selected { background: #e0f2fe; color: #0f172a; }
 .div-table__spacer, .div-table__grid { position: absolute; top: 0; left: 0; }
 .div-table__spacer { width: v-bind(spacerWidthPx); height: v-bind(spacerHeightPx); }
 .div-table__grid { transform: translate(v-bind(gridOffsetXPx), v-bind(gridOffsetYPx)); }
 .div-table__row { display: flex; height: v-bind(rowHeightPx); }
-.div-table__cell { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 0 8px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fff; }
+.div-table__cell { border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; padding: 0 8px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fff; flex: 0 0 auto; min-width: 0; }
+.div-table__cell-text { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .div-table__cell.is-drag-target { box-shadow: inset 2px 0 0 #3b82f6; }
 .div-table__cell.is-row-selected { background: #e0f2fe; }
 .div-table__cell.is-selected { background: #dbeafe; }
