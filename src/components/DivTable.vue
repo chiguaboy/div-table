@@ -35,8 +35,7 @@
 
           <button
             class="div-table__resize-handle"
-            :class="{ 'is-disabled': !isColumnResizeEnabled }"
-            :title="isColumnResizeEnabled ? '拖拽调整列宽' : '当前为列名自适应宽度模式'"
+            title="拖拽调整列宽"
             @pointerdown.stop="onResizeHandlePointerDown($event, col.index)"
           >
             ⋮
@@ -144,8 +143,7 @@ const measuredFontSize = ref(13);
 const rowHeightState = ref(props.rowHeight);
 const rowHeightAuto = ref(true);
 type ColumnWidthMode = 'fixed' | 'label' | 'auto';
-const columnWidthMode = ref<'fixed' | 'label'>('fixed');
-const fixedWidthCache = new Map<number, number>();
+const columnWidthMode = ref<'fixed' | 'label'>('label');
 const rowIndexWidth = computed(() => {
   const digits = String(props.rowCount).length;
   return Math.max(48, digits * 8 + 16);
@@ -235,21 +233,6 @@ const calcLabelAutoWidth = (label: string) => {
   const units = calcLabelUnits(label.trim() || ' ');
   const base = Math.ceil(units * effectiveFontSize.value * 0.62 + 46);
   return Math.max(80, base);
-};
-
-const snapshotFixedColumnWidths = () => {
-  allColumns.value.forEach((col) => {
-    fixedWidthCache.set(col.index, Math.max(60, col.width));
-  });
-};
-
-const applyFixedColumnWidths = () => {
-  allColumns.value.forEach((col) => {
-    const cached = fixedWidthCache.get(col.index);
-    if (typeof cached !== 'number') return;
-    if (cached === col.width) return;
-    resizeColumnByIndex(col.index, cached);
-  });
 };
 
 const applyLabelAutoWidths = () => {
@@ -386,10 +369,7 @@ const {
   reorderColumns: reorderColumnByPosition,
 });
 
-const isColumnResizeEnabled = computed(() => columnWidthMode.value === 'fixed');
-
 const onResizeHandlePointerDown = (event: PointerEvent, colIndex: number) => {
-  if (!isColumnResizeEnabled.value) return;
   startResize(event, colIndex);
 };
 
@@ -451,22 +431,15 @@ const setColumnWidthMode = (mode: ColumnWidthMode) => {
   const normalizedMode = normalizeColumnWidthMode(mode);
   if (!normalizedMode) return;
   if (normalizedMode === columnWidthMode.value) return;
-  if (normalizedMode === 'label') {
-    snapshotFixedColumnWidths();
-  }
   columnWidthMode.value = normalizedMode;
   if (normalizedMode === 'label') {
     applyLabelAutoWidths();
-    return;
   }
-  applyFixedColumnWidths();
 };
 
 const setColumnWidth = (columnIndex: number, width: number) => {
   if (!Number.isFinite(width) || width <= 0) return;
   const normalized = Math.max(60, Math.round(width));
-  fixedWidthCache.set(columnIndex, normalized);
-  if (columnWidthMode.value === 'label') return;
   resizeColumnByIndex(columnIndex, normalized);
 };
 
@@ -553,26 +526,12 @@ watch(
 
 watch(effectiveFontSize, () => {
   applyAdaptiveRowHeight();
-  if (columnWidthMode.value === 'label') {
-    applyLabelAutoWidths();
-  }
 });
-
-watch(
-  () => allColumns.value.map((col) => `${col.index}:${col.label}`).join('|'),
-  () => {
-    if (columnWidthMode.value !== 'label') return;
-    applyLabelAutoWidths();
-  },
-);
 
 onMounted(() => {
   mountViewport();
   syncMeasuredFontSize();
   applyAdaptiveRowHeight();
-  if (columnWidthMode.value === 'label') {
-    applyLabelAutoWidths();
-  }
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', stopResize);
   window.addEventListener('pointerup', stopDrag);
@@ -658,10 +617,9 @@ watch(
 .div-table__drag-handle,
 .div-table__resize-handle { width: 18px; height: 100%; border: 0; background: transparent; color: #64748b; opacity: 0; cursor: grab; transition: opacity 0.15s ease; }
 .div-table__resize-handle { cursor: col-resize; }
-.div-table__resize-handle.is-disabled { opacity: 0.35 !important; cursor: not-allowed; }
 .div-table__rename-input { width: 100%; height: 26px; border: 1px solid #60a5fa; border-radius: 4px; padding: 0 6px; }
 .div-table__drag-indicator { position: absolute; top: 0; height: 40px; width: 2px; background: #3b82f6; pointer-events: none; transition: transform 0.1s ease; opacity: v-bind(dragIndicatorOpacity); transform: translateX(v-bind(dragIndicatorOffsetPx)); }
-.div-table__body { flex: 1; position: relative; font-size: 13px; overflow: hidden; }
+.div-table__body { flex: 1; position: relative; font-size: 14px; overflow: hidden; }
 .div-table__scroll { width: 100%; height: 100%; overflow: auto; position: relative; min-width: 0; }
 .div-table__scroll.is-selecting { user-select: none; }
 .div-table__scroll.is-selecting .div-table__cell-input { user-select: text; }
